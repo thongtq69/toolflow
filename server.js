@@ -227,7 +227,7 @@ const ts = () => new Date().toISOString().replace(/[:.]/g, '-');
 // ────────────────────────────────────────────────────────────
 // LOG BUFFER + SSE BROADCAST
 // ────────────────────────────────────────────────────────────
-const LOG_MAX = 800;
+const LOG_MAX = 300; // giảm từ 800 → 300 cho nhẹ memory + ít DOM thrash trên client
 const logBuffer = [];
 const sseClients = new Set();
 const stripColors = (s) => String(s).replace(/\[\d+(;\d+)*m/g, '');
@@ -333,7 +333,8 @@ const archiveFrameIfExists = async (proj, frame_id) => {
   return archiveId;
 };
 
-// debugShot keeps writing to OUTPUT_DIR (legacy default) — fine for stage 2; per-project debug not required.
+// debugShot writes vào OUTPUT_DIR/_debug. Auto-prune keep last DEBUG_KEEP files.
+const DEBUG_KEEP = 10;
 const debugShot = async (label, page = null) => {
   try {
     const dir = path.join(OUTPUT_DIR, '_debug');
@@ -343,6 +344,13 @@ const debugShot = async (label, page = null) => {
     if (!targetPage) return null;
     await targetPage.screenshot({ path: file, fullPage: false });
     console.log(`  [debug-shot] ${file}`);
+    // Auto-prune older shots — giữ last DEBUG_KEEP files
+    fs.readdir(dir).then(async (files) => {
+      const pngs = files.filter(f => f.endsWith('.png')).sort();
+      if (pngs.length <= DEBUG_KEEP) return;
+      const toDelete = pngs.slice(0, pngs.length - DEBUG_KEEP);
+      for (const f of toDelete) await fs.unlink(path.join(dir, f)).catch(() => {});
+    }).catch(() => {});
     return file;
   } catch (e) {
     console.warn('  [debug-shot] failed:', e.message);
@@ -1021,7 +1029,13 @@ app.use('/projects/:slug/output', (req, res, next) => {
   if (!proj) return res.status(404).end();
   express.static(proj.outputDir)(req, res, next);
 });
-app.use(express.static(PUBLIC_DIR));
+// Static public/ — cache 1 day cho tailwind.js (immutable big asset). HTML/index không cache.
+app.use(express.static(PUBLIC_DIR, {
+  maxAge: '1d',
+  setHeaders: (res, filepath) => {
+    if (filepath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+  },
+}));
 
 // Wrap a per-project handler so legacy + slug routes share the same body.
 // `slugSource` is either a fixed slug string ('default') or a function (req) => slug

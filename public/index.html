@@ -862,23 +862,29 @@ function getActiveJobs() {
   return getJobs().filter(j => j && (j.status === 'running' || j.status === 'waiting_pick'));
 }
 
-// ─── State fetch + render ───
-async function fetchState() {
+// ─── State fetch + render (smart skip nếu hash unchanged) ───
+let lastStateHash = '';
+async function fetchState(force = false) {
   try {
     const r = await fetch(apiUrl('/api/state')).then(r => r.json());
     if (r.error) return;
+    // Skip re-render nếu hash unchanged — tránh DOM thrash khi nothing changed
+    const hashKey = JSON.stringify({
+      jobs: r.jobs?.map(j => `${j.frameId}:${j.status}:${j.attempts}`).sort(),
+      picked: Object.keys(r.state?.picked || {}).sort(),
+      overrides: Object.keys(r.overrides || {}).sort(),
+      custom: (r.custom_frames || []).map(c => c.frame_id || c).sort(),
+      blocks: r.blocks?.setting?.length + ':' + r.blocks?.style?.length,
+      workers: r.workers?.map(w => `${w.id}:${w.busy}`).sort(),
+    });
+    if (!force && hashKey === lastStateHash) return;
+    lastStateHash = hashKey;
     appState = r;
     if (!appState.overrides) appState.overrides = {};
     if (!appState.custom_frames) appState.custom_frames = [];
     renderJobStatus();
     renderFrameList();
-    // If viewing a specific frame, refresh its data; else follow active job
-    if (viewState.frameId) {
-      // light refresh: re-render center using cached frameData; the user may want fresh, but avoid spam
-      renderCenter();
-    } else {
-      renderCenter();
-    }
+    renderCenter();
   } catch (e) { console.warn(e); }
 }
 
@@ -2049,9 +2055,11 @@ $('btn-save-settings').onclick = async () => {
 
 // ─── Init ───
 connectSSE();
-fetchProjects().then(() => fetchState());
-setInterval(fetchState, 4000);
-setInterval(fetchProjects, 30000); // refresh project list mỗi 30s (catch new project added)
+fetchProjects().then(() => fetchState(true));
+// Polling: 8s thay vì 4s. SSE đã push job events realtime, polling chỉ catch state.picked/overrides/blocks
+// (không có SSE event). Hash check skip render nếu nothing changed → ít DOM thrash.
+setInterval(fetchState, 8000);
+setInterval(fetchProjects, 60000); // refresh project list mỗi 60s
 maybeShowWizard();
 </script>
 </body>

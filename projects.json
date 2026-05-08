@@ -16,11 +16,11 @@
       "createdAt": "2026-05-08T08:52:52.255Z"
     },
     {
-      "slug": "111",
-      "name": "111",
-      "projectId": "111",
-      "workers": 111,
-      "createdAt": "2026-05-08T08:57:31.935Z"
+      "slug": "cafe",
+      "name": "Cafe",
+      "projectId": "1a1a492a-eb3a-4fc3-a4ee-a8a6f0eedd16",
+      "workers": 1,
+      "createdAt": "2026-05-08T12:06:41.230Z"
     }
   ]
 }
