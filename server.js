@@ -891,10 +891,12 @@ const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
       if (r.source === 'v1-fallback') console.log(`[refs ${proj.slug}] ${f.frame_id}: extra_reference ${fid} chưa pick → dùng v1.png fallback`);
     } else console.warn(`[refs ${proj.slug}] ${f.frame_id}: extra_reference ${fid} chưa gen — skip`);
   }
-  if (Array.isArray(f.reference_files)) {
-    for (const rf of f.reference_files) {
-      refs.push(path.isAbsolute(rf) ? rf : path.join(proj.outputDir, rf));
-    }
+  // reference_files: override > frame def. Override = ảnh upload qua UI Edit panel.
+  const effectiveRefFiles = Array.isArray(ov.reference_files)
+    ? ov.reference_files
+    : (Array.isArray(f.reference_files) ? f.reference_files : []);
+  for (const rf of effectiveRefFiles) {
+    refs.push(path.isAbsolute(rf) ? rf : path.join(proj.outputDir, rf));
   }
 
   await archiveFrameIfExists(proj, f.frame_id);
@@ -1294,7 +1296,8 @@ const handleState = async (proj, req, res) => {
     else if (picked) status = 'picked';
     const hasOv = !!(override?.action
       || (override && 'default_reference' in override)
-      || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
+      || (Array.isArray(override?.extra_references) && override.extra_references.length > 0)
+      || (Array.isArray(override?.reference_files) && override.reference_files.length > 0));
     // Có ảnh trên đĩa? (đã gen ít nhất 1 lần — kể cả chưa pick)
     const hasOutput = fsSync.existsSync(path.join(proj.outputDir, f.frame_id, 'v1.png'));
     return { ...f, status, picked, override, has_override: hasOv, has_output: hasOutput };
@@ -1377,11 +1380,10 @@ app.post('/api/p/:slug/repick', wrapProjectHandler(handleRepick));
 // ─── Save / clear frame override (action prompt + extra_references) ───
 const handleOverridePrompt = async (proj, req, res) => {
   const body = req.body || {};
-  const { frame_id, action, default_reference, extra_references, _clear } = body;
+  const { frame_id, action, default_reference, extra_references, reference_files, _clear } = body;
   if (!frame_id) return res.status(400).json({ error: 'frame_id bắt buộc' });
   const overrides = await loadOverrides(proj);
 
-  // Special: _clear: true → xoá hoàn toàn override entry, frame về lại bản gốc frames.json
   if (_clear) {
     delete overrides[frame_id];
     await saveOverrides(proj, overrides);
@@ -1408,15 +1410,22 @@ const handleOverridePrompt = async (proj, req, res) => {
     if (!Array.isArray(extra_references) || extra_references.length === 0) delete cur.extra_references;
     else cur.extra_references = [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim()))];
   }
+  // reference_files: array path/URL ảnh upload từ máy (anchor / character ref)
+  // Override 'reference_files' nếu defined (mảng rỗng = clear, không sửa frame def)
+  if (reference_files !== undefined) {
+    if (!Array.isArray(reference_files) || reference_files.length === 0) delete cur.reference_files;
+    else cur.reference_files = reference_files.filter(x => typeof x === 'string' && x.trim());
+  }
 
   const hasContent = cur.action != null
     || 'default_reference' in cur
-    || (Array.isArray(cur.extra_references) && cur.extra_references.length > 0);
+    || (Array.isArray(cur.extra_references) && cur.extra_references.length > 0)
+    || (Array.isArray(cur.reference_files) && cur.reference_files.length > 0);
 
   if (hasContent) {
     cur.updatedAt = new Date().toISOString();
     overrides[frame_id] = cur;
-    console.log(`[override ${proj.slug}] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  default=${cur.default_reference ?? (('default_reference' in cur) ? 'null' : '-')}  extra_refs=${(cur.extra_references || []).join(',') || '-'}`);
+    console.log(`[override ${proj.slug}] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  default=${cur.default_reference ?? (('default_reference' in cur) ? 'null' : '-')}  extra_refs=${(cur.extra_references || []).join(',') || '-'}  uploads=${(cur.reference_files || []).length}`);
   } else {
     delete overrides[frame_id];
     console.log(`[override ${proj.slug}] cleared ${frame_id}`);

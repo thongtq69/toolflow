@@ -184,6 +184,11 @@
             <span class="text-emerald-400">✓ picked</span> · <span class="text-amber-400">◌ output</span> · <span class="text-zinc-500">⚠ chưa gen</span>
           </p>
 
+          <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">Ảnh upload từ máy (anchor / character ref)</label>
+          <input id="edit-files" type="file" accept="image/*" multiple class="input w-full text-xs">
+          <div id="edit-files-preview" class="flex flex-wrap gap-2 mt-2"></div>
+          <p class="text-[10px] text-zinc-500 mt-1">Upload thêm ảnh ngoài để bot dùng làm reference (vd: character_male.png, master_plan.png). Lưu vào override → bot upload trước khi gen.</p>
+
           <div class="flex gap-2 mt-3">
             <button id="btn-save-action" class="btn btn-emerald text-xs">💾 Save</button>
             <button id="btn-clear-action" class="btn btn-red text-xs">✕ Clear override</button>
@@ -1280,15 +1285,65 @@ $('btn-gen-this-frame').onclick = async () => {
 
 // ─── Edit action + refs (refs ordered, vị trí 0 = default) ───
 let editRefsOrder = []; // ordered array of frame IDs
+let editUploadedRefs = []; // server paths của ảnh upload từ máy (override.reference_files)
+
+const renderEditUploadedRefs = () => {
+  const wrap = $('edit-files-preview');
+  wrap.innerHTML = '';
+  editUploadedRefs.forEach((p, i) => {
+    const filename = p.split('/').pop();
+    const item = document.createElement('div');
+    item.className = 'relative flex items-center gap-1 bg-zinc-800 rounded px-2 py-1';
+    item.innerHTML = `
+      <span class="text-[10px] text-zinc-300 mono">${escapeHtml(filename)}</span>
+      <button class="text-zinc-500 hover:text-red-400 text-xs ml-1" data-idx="${i}">×</button>
+    `;
+    item.querySelector('button').onclick = () => {
+      editUploadedRefs.splice(i, 1);
+      renderEditUploadedRefs();
+    };
+    wrap.appendChild(item);
+  });
+};
+
+$('edit-files').addEventListener('change', async (e) => {
+  const files = [...(e.target.files || [])];
+  if (files.length === 0) return;
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) { toast(`Bỏ qua không phải ảnh: ${file.name}`, 'error'); continue; }
+    if (file.size > 20 * 1024 * 1024) { toast(`${file.name} > 20MB, bỏ qua`, 'error'); continue; }
+    try {
+      const dataUrl = await fileToBase64(file);
+      const base64 = dataUrl.split(',')[1] || '';
+      const r = await fetch(apiUrl('/api/upload-reference'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, base64 })
+      }).then(r => r.json());
+      if (r.error) { toast(r.error, 'error'); continue; }
+      editUploadedRefs.push(r.path);
+    } catch (err) {
+      toast(`Upload fail: ${file.name} — ${err.message}`, 'error');
+    }
+  }
+  renderEditUploadedRefs();
+  e.target.value = '';
+});
+
 $('btn-edit-action').onclick = () => {
   const frameId = viewState.frameId || appState.job?.frameId;
   const f = appState.frames?.find(x => x.frame_id === frameId);
   if (!f) return;
   const ov = appState.overrides?.[frameId];
   $('edit-action-text').value = (ov && ov.action) || f.action || '';
-  // Init order: default trước, rồi extra (đã dedupe). Show TẤT CẢ frame (trừ frame hiện tại).
   editRefsOrder = effectiveAllRefs(f);
   renderRefChips($('edit-extra-refs'), appState.frames || [], frameId, editRefsOrder);
+  // Init uploaded refs từ override > frame def
+  editUploadedRefs = Array.isArray(ov?.reference_files)
+    ? [...ov.reference_files]
+    : (Array.isArray(f.reference_files) ? [...f.reference_files] : []);
+  renderEditUploadedRefs();
+  $('edit-files').value = '';
   $('edit-action-form').style.display = '';
 };
 $('btn-cancel-action').onclick = () => { $('edit-action-form').style.display = 'none'; };
@@ -1298,20 +1353,22 @@ $('btn-save-action').onclick = async () => {
   const f = appState.frames?.find(x => x.frame_id === frameId);
   const text = $('edit-action-text').value.trim();
   const actionVal = (text && text !== (f?.action || '').trim()) ? text : '';
-  // Pack refs: vị trí 0 = default_reference, còn lại = extra_references
   const newDefault = editRefsOrder[0] || null;
   const newExtras = editRefsOrder.slice(1);
   const body = { frame_id: frameId, action: actionVal, extra_references: newExtras };
-  // Chỉ override default_reference khi user thay đổi (so với frame.default_reference)
-  if (newDefault !== (f?.default_reference || null)) {
-    body.default_reference = newDefault; // có thể null = bỏ default
-  }
+  if (newDefault !== (f?.default_reference || null)) body.default_reference = newDefault;
+  // reference_files: chỉ gửi nếu khác frame def gốc (tránh override không cần thiết)
+  const frameRefFiles = Array.isArray(f?.reference_files) ? f.reference_files : [];
+  const sameRefFiles = editUploadedRefs.length === frameRefFiles.length
+    && editUploadedRefs.every((p, i) => p === frameRefFiles[i]);
+  if (!sameRefFiles) body.reference_files = editUploadedRefs;
   const r = await api('/api/override-prompt', body);
   if (r && !r.error) {
     const parts = [];
     if (actionVal) parts.push('action');
     if ('default_reference' in body) parts.push('default→' + (newDefault || 'null'));
     if (newExtras.length) parts.push(`${newExtras.length} extra refs`);
+    if ('reference_files' in body) parts.push(`${body.reference_files.length} ảnh upload`);
     toast(parts.length ? `Đã lưu override: ${parts.join(' + ')}` : 'Đã xoá override', 'success');
     $('edit-action-form').style.display = 'none';
     fetchState();
