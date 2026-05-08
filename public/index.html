@@ -1107,9 +1107,28 @@ $('wz-btn-to-3').onclick = () => {
 };
 
 // Step 3: default template + finish
-$('wz-btn-default-frames').onclick = () => {
-  $('wz-frames-json').value = JSON.stringify(DEFAULT_FRAMES_TEMPLATE, null, 2);
-  $('wz-frames-status').textContent = 'Đã load template — chỉnh sửa rồi bấm Hoàn tất';
+$('wz-btn-default-frames').onclick = async () => {
+  $('wz-btn-default-frames').disabled = true;
+  $('wz-frames-status').textContent = '⏳ đang load template...';
+  try {
+    // Fetch full 10-frame template từ server (file frames.example.json trong repo)
+    const r = await fetch('/api/setup/template-frames');
+    if (r.ok) {
+      const text = await r.text();
+      $('wz-frames-json').value = text;
+      const parsed = JSON.parse(text);
+      $('wz-frames-status').textContent = `✓ Loaded ${parsed.frames?.length || 0} frame template — chỉnh sửa rồi bấm Hoàn tất`;
+    } else {
+      // Fallback nếu server không có file (rare)
+      $('wz-frames-json').value = JSON.stringify(DEFAULT_FRAMES_TEMPLATE, null, 2);
+      $('wz-frames-status').textContent = '⚠ Server không có template, dùng stub. Anh tự edit thêm frames.';
+    }
+  } catch (e) {
+    $('wz-frames-json').value = JSON.stringify(DEFAULT_FRAMES_TEMPLATE, null, 2);
+    $('wz-frames-status').textContent = '⚠ Load fail: ' + e.message;
+  } finally {
+    $('wz-btn-default-frames').disabled = false;
+  }
 };
 
 $('wz-btn-finish').onclick = async () => {

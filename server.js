@@ -1291,6 +1291,17 @@ app.post('/api/upload-reference', async (req, res) => {
   }
 });
 
+// Trả nội dung frames.example.json để wizard "Dùng template mặc định" pre-fill textarea
+app.get('/api/setup/template-frames', async (req, res) => {
+  try {
+    const tplPath = path.resolve(__dirname, './frames.example.json');
+    const content = await fs.readFile(tplPath, 'utf8');
+    res.type('application/json').send(content);
+  } catch (e) {
+    res.status(404).json({ error: 'frames.example.json không tồn tại trong repo' });
+  }
+});
+
 // Upload frames.json từ UI (template hoặc paste JSON)
 app.post('/api/setup/save-frames', async (req, res) => {
   try {

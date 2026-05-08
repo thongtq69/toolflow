@@ -1,8 +1,9 @@
 {
+  "_doc": "Template storyboard 10-frame cho VideoFlow Frame Bank. Mỗi 'frame' = 1 cảnh trong video 60s (~6s/frame). Bot sẽ gen 4 variants cho mỗi frame, anh pick variant ưng → tự động dùng làm reference cho frame kế. Edit blocks.setting + blocks.style + frames[*].action để custom theo project của anh. Sau khi paste vào Setup Wizard step 3, file này sẽ thành ./frames.json. Trong UI, anh có thể tiếp tục Edit Action từng frame và + New Frame ad-hoc.",
   "project": {
-    "name": "Resort 1000m2 — Tour Video 60s",
-    "flow_project_id": "7f2c2def-e34d-4c94-bfb1-2a862c2156c0",
-    "flow_project_url": "https://labs.google/fx/tools/flow/project/7f2c2def-e34d-4c94-bfb1-2a862c2156c0",
+    "name": "Resort Eco 1000m2 — Tour Video 60s (template)",
+    "flow_project_id": "",
+    "flow_project_url": "",
     "aspect_ratio": "PORTRAIT",
     "image_model": "NARWHAL",
     "image_model_label": "Nano Banana 2",
@@ -12,18 +13,20 @@
     "video_duration_seconds": 6
   },
   "blocks": {
-    "setting": "Modern eco resort 1000m2 in Vietnam, 5 bungalows with natural thatched roof arranged in a row, central swimming pool, organic vegetable garden with raised wooden beds, pickleball court, BBQ camping area with wooden tables, parking lot for 8 cars, surrounded by tropical trees and bamboo. Master plan layout.",
+    "_doc": "setting + style được prepend vào MỌI prompt. setting = bối cảnh chung không đổi. style = look-and-feel toàn video. action = phần riêng của từng frame (chỉnh được qua UI Edit Action).",
+    "setting": "Modern eco resort 1000m2 in Vietnam, 5 bungalows with natural thatched roof arranged in a row, central swimming pool, organic vegetable garden with raised wooden beds, pickleball court, BBQ camping area with wooden tables, parking lot for 8 cars, surrounded by tropical trees and bamboo. Master plan layout consistent across all shots.",
     "style": "Photorealistic, cinematic 9:16 portrait, golden hour warm lighting, shallow depth of field, vibrant green and earth tones, high detail, captured by Sony A7IV with 35mm lens, professional architectural photography."
   },
   "anchors": {
+    "_doc": "(Optional) Anchor images = reference cứng cho 1 nhóm frame để giữ layout/character đồng nhất. Đặt file vào ./anchors/. Có thể attach manually qua UI '+ New Frame' upload.",
     "master_plan": {
       "file": "anchors/master_plan.png",
-      "description": "Sketch mặt bằng 1000m2 — anchor cho F01, F08 để giữ layout đồng nhất giữa các góc nhìn",
+      "description": "Sketch mặt bằng 1000m2 — giữ layout đồng nhất giữa các góc nhìn aerial",
       "required_for_frames": ["F01", "F08"]
     },
     "character_male": {
       "file": "anchors/character_male.png",
-      "description": "Model nam ~30 tuổi, áo polo trắng, quần short kaki — anchor cho F06, F07, F09 để giữ outfit/face nhất quán",
+      "description": "Model nam ~30 tuổi, áo polo trắng, quần short kaki — giữ outfit/face nhất quán cho cảnh có người",
       "required_for_frames": ["F06", "F07", "F09"]
     }
   },
@@ -55,18 +58,18 @@
       "default_reference": "F02",
       "extra_anchor": null,
       "selectable_references": ["F01", "F02"],
-      "action": "Low-angle shot from the ground capturing the 5 bungalows in a perfect row, thatched roofs glowing under golden hour, wooden walls with warm light spilling from open windows, a few rocking chairs on the veranda, hammock between two posts.",
-      "video_take_prompt": "Lateral tracking shot moving past the 5 bungalows, parallax revealing depth."
+      "action": "Low-angle shot from the ground capturing all 5 bungalows in a perfect row, thatched roofs glowing under golden hour, wooden walls with warm light spilling from open windows, rocking chairs on each veranda, hammock between two posts on the nearest one.",
+      "video_take_prompt": "Lateral tracking shot moving past the 5 bungalows, parallax revealing depth between front + back rows."
     },
     {
       "frame_id": "F04",
       "tag": "[F04-POOL]",
-      "topic": "Pool xanh ngọc",
+      "topic": "Hồ bơi xanh ngọc",
       "default_reference": "F03",
       "extra_anchor": null,
       "selectable_references": ["F01", "F03"],
-      "action": "Medium shot of the central swimming pool, turquoise water reflecting the sky, six wooden sun loungers along the edge, white towels neatly folded, calm ripples on the water surface, a tropical drink on a side table in the foreground.",
-      "video_take_prompt": "Slow zoom in on the pool surface, reflections rippling, ending on close-up of water."
+      "action": "Wide shot at pool level, turquoise water with stone-tiled edges, sun loungers with white towels, an empty fresh coconut on a wooden side table at foreground, palm trees reflected on the water surface, soft afternoon light.",
+      "video_take_prompt": "Slow push-in toward the pool from poolside chair POV, water ripples gently."
     },
     {
       "frame_id": "F05",
@@ -75,28 +78,28 @@
       "default_reference": "F04",
       "extra_anchor": null,
       "selectable_references": ["F01", "F04"],
-      "action": "Close-up shot of organic vegetable garden, raised wooden beds with leafy greens (lettuce, basil, mint, coriander), small stone path between rows, dewdrops on leaves, morning soft light, a wooden basket with freshly picked greens in the foreground.",
-      "video_take_prompt": "Macro pull-back from a single leaf to reveal the whole garden, bokeh foreground."
+      "action": "Close-up of organic vegetable garden with raised wooden beds, leafy greens (lettuce, basil, kale) sparkling with morning dew, hand of a gardener gently picking a cherry tomato, soft warm sunrise backlight, blurred bungalow row in background.",
+      "video_take_prompt": "Macro pull-back from tomato to wider garden context, rack focus shift."
     },
     {
       "frame_id": "F06",
-      "tag": "[F06-PICKLE]",
+      "tag": "[F06-PICKLEBALL]",
       "topic": "Sân pickleball",
       "default_reference": "F05",
       "extra_anchor": "character_male",
       "selectable_references": ["F01", "F05"],
-      "action": "Wide shot of the pickleball court at sunset, blue surface with white lines, two players mid-action (one wearing the white polo and khaki shorts from the character anchor), paddle swinging, slight motion blur, warm golden side-light, audience of 3 people watching.",
-      "video_take_prompt": "Slow-motion pickleball rally, paddle hits ball, ball arcs across frame."
+      "action": "Action shot on the pickleball court, a young Vietnamese male player in white polo and khaki shorts mid-swing, paddle blurred, bright green court surface, white net, palm trees fence in background, warm midday light, dust particles caught in sunbeams.",
+      "video_take_prompt": "Slow-motion swing then snap to ball trajectory, sound of paddle impact."
     },
     {
       "frame_id": "F07",
       "tag": "[F07-BBQ]",
-      "topic": "BBQ camping",
+      "topic": "Khu BBQ camping",
       "default_reference": "F06",
       "extra_anchor": "character_male",
       "selectable_references": ["F01", "F06"],
-      "action": "Twilight shot of the BBQ camping area, smoking grill in foreground with skewers of meat, group of 5 friends gathered around a wooden table laughing (one of them is the character anchor still wearing the white polo), string lights overhead, warm orange and purple sky, two tents in the background.",
-      "video_take_prompt": "Push-in toward the group laughing, smoke rising from grill, golden hour fade."
+      "action": "BBQ camping zone at twilight, the same young Vietnamese male in white polo grilling skewers, two friends seated around a wooden table with cold drinks, fire pit glow, string lights overhead, smoke curling up, warm orange-magenta sky.",
+      "video_take_prompt": "Push-in on the grill with sizzling meat then pull back to reveal friends laughing."
     },
     {
       "frame_id": "F08",
@@ -105,31 +108,31 @@
       "default_reference": "F07",
       "extra_anchor": "master_plan",
       "selectable_references": ["F01", "F07"],
-      "action": "Aerial drone shot at night, the entire resort lit up with warm string lights along bungalow rooflines and pool deck, pool glowing aqua, surrounding darkness, stars visible in the sky, faint mist rising from the garden, cinematic moody atmosphere.",
-      "video_take_prompt": "Slow aerial orbit at night, lights twinkling, time-lapse cloud motion in background."
+      "action": "Aerial drone shot at night from 80m, the entire resort glowing — bungalow windows golden, pool lit cyan from underwater LEDs, BBQ fire pit a warm orange dot, deep blue twilight sky with first stars, mist rising from the surrounding forest.",
+      "video_take_prompt": "Smooth aerial orbit around the resort revealing twinkling lights, cinematic music swell."
     },
     {
       "frame_id": "F09",
-      "tag": "[F09-LIFE]",
+      "tag": "[F09-MORNING]",
       "topic": "Khách sinh hoạt buổi sáng",
       "default_reference": "F08",
       "extra_anchor": "character_male",
-      "selectable_references": ["F01", "F04"],
-      "action": "Eye-level lifestyle shot, a family of 4 enjoying breakfast at outdoor wooden table near the pool (the father is the character anchor wearing white polo), fresh tropical fruit on plates, kids laughing, soft morning haze, candid moment, breakfast pastries and coffee on table.",
-      "video_take_prompt": "Handheld observational shot of the family eating, natural micro-movements."
+      "selectable_references": ["F01", "F08"],
+      "action": "Morning shot on the bungalow veranda, the young Vietnamese male in white polo holding a steaming Vietnamese coffee phin, looking out at misty mountains, hammock with crumpled blanket nearby, golden sunrise light through palm leaves casting striped shadows.",
+      "video_take_prompt": "Slow zoom-in on coffee steam then pan up to mountain view with lens flare."
     },
     {
       "frame_id": "F10",
       "tag": "[F10-INTERIOR]",
-      "topic": "Bungalow interior",
+      "topic": "Nội thất bungalow",
       "default_reference": "F09",
       "extra_anchor": null,
       "selectable_references": ["F03", "F09"],
-      "action": "Interior wide shot of one bungalow, warm wooden walls and floor, queen bed with white linens and rattan headboard, large window framing the garden view from F05, hanging rattan lamp, a wooden desk with notebook and tropical flower in vase, peaceful and cozy ambience.",
-      "video_take_prompt": "Slow pan across the bungalow interior ending on the window view, warm light shift."
+      "action": "Interior shot of bungalow at golden hour, polished wooden floor, king-size bed with white linen and tropical-pattern throw pillow, large window opening to garden view with bamboo, ceiling fan slowly spinning, pendant rattan lamp, suitcase open with folded clothes hinting at arrival.",
+      "video_take_prompt": "Wide tracking shot from doorway to window framing the view, ending on a still composition."
     }
   ],
   "transitions": [
-    { "from": "F01", "to": "F08", "kind": "i2v_fl_day_to_night", "prompt": "Day to night cinematic transition over the resort, time-lapse." }
+    { "from": "F01", "to": "F08", "kind": "i2v_day_to_night", "prompt": "Day to night cinematic transition over the resort, time-lapse." }
   ]
 }
