@@ -548,20 +548,23 @@ const setReference = async (page, filePath) => {
     }).length;
   });
 
-  // Click + button (text 'add_2Create' trong UI)
-  const addBtn = page.locator('button').filter({ hasText: /^add_2\s*Create$/ }).first();
+  // Click + button. Material Icon name 'add_2' là universal (không đổi theo locale).
+  // Vietnamese UI: "add_2Tạo" · English UI: "add_2Create" — match theo icon name.
+  const addBtn = page.locator('button').filter({ hasText: /^add_2\s*\S+$/ }).first();
   await addBtn.click({ timeout: 8000 });
   await humanPause(500, 1000);
 
   // Đợi dialog picker mở
   await page.waitForSelector('[role="dialog"]', { timeout: 5000 });
 
-  // Tìm "Upload image" link/button trong dialog → click sẽ trigger file chooser
+  // Tìm "Upload image" / "Tải ảnh lên" / "Tải hình ảnh lên" trong dialog.
+  // Match cả 3 ngôn ngữ + icon name 'upload' nếu có.
   const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 8000 });
-  const uploadTrigger = page.locator('[role="dialog"]').getByText(/upload\s+image/i).first();
+  const uploadRegex = /upload\s*image|t[aả]i\s*[aả]nh|t[aả]i\s*h[iì]nh|file_upload|drive_folder_upload/i;
+  const uploadTrigger = page.locator('[role="dialog"]').getByText(uploadRegex).first();
   await uploadTrigger.click({ timeout: 5000 }).catch(async (e) => {
     await debugShot('ref_upload_btn_missing');
-    throw new Error(`Không tìm được "Upload image" button: ${e.message}`);
+    throw new Error(`Không tìm được "Upload image"/"Tải ảnh" button: ${e.message}`);
   });
 
   const fileChooser = await fileChooserPromise.catch(async (e) => {
