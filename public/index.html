@@ -626,11 +626,22 @@ async function switchProject(slug) {
 async function openNewProjectPrompt() {
   const name = prompt('Tên project (vd: "Cafe Luxury"):');
   if (!name) return;
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  // Slug: kebab-case từ tên, đảm bảo bắt đầu bằng chữ
+  let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   if (!slug) { toast('Tên không hợp lệ', 'error'); return; }
+  // Slug bắt buộc bắt đầu chữ → prepend 'p-' nếu bắt đầu số
+  if (/^[0-9]/.test(slug)) slug = 'p-' + slug;
   if (projectsList.some(p => p.slug === slug)) { toast(`Slug "${slug}" đã tồn tại`, 'error'); return; }
-  const projectId = prompt('Flow project ID (UUID — paste từ URL https://labs.google/fx/tools/flow/project/<UUID>):');
-  if (!projectId) return;
+  const rawProjectId = prompt(
+    'Paste URL Flow project HOẶC project ID (UUID):\n\n' +
+    'VD URL: https://labs.google/fx/tools/flow/project/ab883b63-982a-4df4-80ca-f9d6da04ec64\n' +
+    'VD UUID: ab883b63-982a-4df4-80ca-f9d6da04ec64\n\n' +
+    '→ Bot tự extract UUID nếu anh paste cả URL.'
+  );
+  if (!rawProjectId) return;
+  // Auto-extract UUID nếu user paste full URL
+  const uuidMatch = rawProjectId.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  const projectId = uuidMatch ? uuidMatch[0] : rawProjectId.trim();
   const workers = parseInt(prompt('Số workers (1-3):', '1'), 10) || 1;
   const separateProfile = confirm(
     `Dùng Google account RIÊNG cho project "${name}"?\n\n` +
