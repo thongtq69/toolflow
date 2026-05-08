@@ -65,10 +65,11 @@ let lastGenAt = 0; // legacy global, vẫn ghi để giữ backward-compat
 // Fix: serialize submit clicks per-profile với gap min, để spread requests ra time.
 // Workers vẫn parallel gen (mỗi gen ~30-60s), chỉ submit moments stagger nhau.
 const profileSubmitState = new Map(); // profileDir → { chain: Promise, lastAt: number }
-// Gap min giữa 2 submits trên cùng profile (test thực tế trên Flow:
-// 4.5s → 2/7 success; 12s → 5/7; 15s → expected 7/7)
-// Configurable via env SUBMIT_GAP_MS để anh tune theo Flow rate-limit thực tế.
-const SUBMIT_GAP_MS = parseInt(process.env.SUBMIT_GAP_MS, 10) || 15000;
+// Gap min giữa 2 submits trên cùng profile (verified trên Flow API thực tế,
+// 7 workers × 1 account = 28 requests):
+// 4.5s → 2/7 success | 12s → 5/7 | 15s → 4/7 | 25s → 6/7 first try, 7/7 sau retry
+// Default 25s = sweet spot. Configurable: SUBMIT_GAP_MS=20000 node server.js
+const SUBMIT_GAP_MS = parseInt(process.env.SUBMIT_GAP_MS, 10) || 25000;
 
 const withSubmitSlot = async (profilePath, fn) => {
   let state = profileSubmitState.get(profilePath);
