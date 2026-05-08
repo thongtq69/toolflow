@@ -862,38 +862,28 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
   await createBtn.click({ timeout: 10000 });
   console.log(`    [click 1/${burstCount}] submitted at ${new Date().toISOString()}`);
 
-  // Burst: dồn (burstCount-1) lượt gen thêm bằng nút "Sử dụng lại câu lệnh" (icon
-  // mũi tên cong dưới mỗi thumbnail). Nút này xuất hiện ngay khi thumbnail bắt đầu
-  // load (10-30%) → click để Flow tự re-submit prompt + settings. Đây là cách CHUẨN
-  // (re-clicking Create button không có hiệu lực vì textbox đã clear sau submit).
+  // Burst: re-type prompt + click submit thêm (burstCount-1) lần với gap 3-4s.
+  // Đã verify (test 5/8/2026): mỗi lần re-submit trigger đúng 4 batchGenerateImages
+  // requests parallel → tổng = 4×burstCount ảnh. Cách này stable hơn click button
+  // thumbnail (undo/redo/refresh inconsistent giữa loading vs completed states).
   for (let i = 2; i <= burstCount; i++) {
-    // Đợi 1.5-3s sau submit trước để thumbnail xuất hiện kèm nút reuse
-    await sleep(rand(1800, 3000));
-    let clicked = false;
-
-    // Strategy 1: theo accessible name (aria-label / tooltip). Locale-flex cho cả VI + EN.
+    await sleep(rand(2800, 3800));
     try {
-      const byName = page.getByRole('button', { name: /s[ưử]\s*d[uụ]ng\s*l[aạ]i\s*c[aâ]u\s*l[eệ]nh|reuse\s*prompt/i }).first();
-      await byName.click({ timeout: 4000 });
-      clicked = true;
-    } catch (e) {}
-
-    // Strategy 2: theo Material Icon name trong button (visible text). Icon 'keyboard_return'
-    // hoặc 'subdirectory_arrow_left' / 'replay' — universal không đổi theo locale.
-    if (!clicked) {
-      try {
-        const byIcon = page.locator('button').filter({ hasText: /^(keyboard_return|subdirectory_arrow_left|replay|redo|u_turn_left)$/ }).first();
-        await byIcon.click({ timeout: 3000 });
-        clicked = true;
-      } catch (e) {}
-    }
-
-    if (!clicked) {
-      await debugShot(`burst_reuse_btn_missing_${i}`, page);
-      console.warn(`    [burst ${i}/${burstCount}] không tìm thấy nút "Sử dụng lại câu lệnh" — dừng burst`);
+      const tb = await findPromptTextbox(page);
+      await tb.click({ timeout: 5000 });
+      await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a').catch(() => {});
+      await sleep(rand(100, 250));
+      await page.keyboard.press('Delete').catch(() => {});
+      await sleep(rand(200, 400));
+      await page.keyboard.insertText(prompt);
+      await sleep(rand(400, 800));
+      const btn = await findCreateButton(page);
+      await btn.click({ timeout: 8000 });
+      console.log(`    [click ${i}/${burstCount}] submitted at ${new Date().toISOString()}`);
+    } catch (e) {
+      console.warn(`    [burst ${i}/${burstCount}] re-submit fail: ${e.message.split('\n')[0]} — dừng burst (vẫn nhận response từ ${i - 1} lượt trước)`);
       break;
     }
-    console.log(`    [burst ${i}/${burstCount}] clicked "Sử dụng lại câu lệnh"`);
   }
 
   let media;
@@ -1183,6 +1173,34 @@ const wrapProjectHandler = (handler) => async (req, res) => {
     res.status(e.httpStatus || 500).json({ error: e.message });
   }
 };
+
+// Debug: dump button list trên page worker để identify selector reuse-button
+app.get('/api/debug/buttons/:slug', async (req, res) => {
+  try {
+    const proj = projects.get(req.params.slug) || defaultProject();
+    const w = proj.pagePool[0];
+    if (!w?.page) return res.status(404).json({ error: 'no worker page' });
+    const buttons = await w.page.evaluate(() => {
+      return [...document.querySelectorAll('button')]
+        .map(b => {
+          const r = b.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return null;
+          const iconChildren = [...b.querySelectorAll('span, i, div')]
+            .map(e => (e.textContent || '').trim())
+            .filter(t => /^[a-z_]+$/.test(t) && t.length >= 3 && t.length <= 30);
+          return {
+            text: (b.textContent || '').trim().slice(0, 60),
+            ariaLabel: b.getAttribute('aria-label'),
+            title: b.getAttribute('title'),
+            iconNames: iconChildren.slice(0, 5),
+            x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+          };
+        })
+        .filter(Boolean);
+    });
+    res.json({ url: w.page.url(), count: buttons.length, buttons });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 app.get('/health', async (req, res) => {
   try {
