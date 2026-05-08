@@ -600,21 +600,72 @@ const setReference = async (page, filePath) => {
   await humanPause(600, 1200);
 };
 
-// Click button settings popup → verify x4 + 9:16 active → click nếu chưa, đóng popup
+// Click button settings popup → verify x4 + 9:16 active → click nếu chưa, đóng popup.
+// Settings button = model dropdown ở prompt bar (text = model name hiện tại).
+// Model name thay đổi theo Flow rollout (Nano Banana, Imagen, Veo, Gemini...) + locale,
+// nên dùng nhiều strategy fallback thay vì hardcode 1 regex.
 const ensureSettings = async (worker, { ratio = '9:16', count = 'x4' } = {}) => {
   if (worker.settingsVerified) return;
   const page = worker.page;
   console.log(`  [${worker.id} setup] verify settings (${ratio} + ${count})`);
-  const settingsBtn = page.locator('button').filter({ hasText: /Nano Banana|Imagen/ }).first();
-  await settingsBtn.click({ timeout: 5000 });
-  await humanPause(600, 1200);
 
-  // Check + click ratio nếu chưa active
   const ratioMap = { '16:9': 'crop_16_9', '4:3': 'crop_landscape', '1:1': 'crop_square', '3:4': 'crop_portrait', '9:16': 'crop_9_16' };
   const ratioIcon = ratioMap[ratio] || 'crop_9_16';
+
+  // Helper: check ratio/count buttons có visible (popup đã mở chưa)?
+  const popupOpen = async () => {
+    return await page.evaluate((iconText) => {
+      const btns = [...document.querySelectorAll('button')];
+      const ratioBtn = btns.find(b => b.textContent.includes(iconText));
+      const countBtn = btns.find(b => /^(x[1-4]|×[1-4])$/.test(b.textContent.trim()));
+      return !!(ratioBtn && countBtn);
+    }, ratioIcon).catch(() => false);
+  };
+
+  // Nếu popup đã mở sẵn (rare case sau resize/reload) → skip click
+  if (!(await popupOpen())) {
+    // Strategy 1: text-based (model names + dropdown markers, locale-flex)
+    const modelRegex = /Nano\s*Banana|Imagen|Veo\s*\d?|Gemini|Flow\s+(?:Gen|Image|Video)|chevron_right|expand_more|arrow_drop_down|tune/i;
+    const settingsBtn = page.locator('button').filter({ hasText: modelRegex }).first();
+
+    let clicked = false;
+    try {
+      await settingsBtn.waitFor({ state: 'visible', timeout: 15000 });
+      await settingsBtn.click({ timeout: 5000 });
+      clicked = true;
+    } catch (e) {
+      console.warn(`  [${worker.id} setup] model button by text fail (${e.message.split('\n')[0]}), thử fallback`);
+    }
+
+    // Strategy 2: button có icon expand_more / arrow_drop_down ngay trước prompt textbox
+    if (!clicked) {
+      try {
+        const submitBtn = page.getByRole('button', { name: /^arrow_forward\b/ }).last();
+        const fallbackBtn = submitBtn.locator('xpath=preceding::button[normalize-space(.)!="" and (contains(.,"expand_more") or contains(.,"arrow_drop_down") or contains(.,"tune"))][1]');
+        await fallbackBtn.click({ timeout: 5000 });
+        clicked = true;
+      } catch (e) {
+        // continue to retry / fail
+      }
+    }
+
+    if (!clicked) {
+      await debugShot(`settings_btn_not_found_${worker.id}`, page);
+      throw new Error(`Không tìm thấy nút settings/model trên Flow UI (model name có thể đã đổi). Thử mở Flow trực tiếp xem model gì đang active, hoặc bấm 🔑 reset login.`);
+    }
+  }
+
+  // Đợi popup render (ratio + count buttons xuất hiện)
+  await page.waitForFunction((iconText) => {
+    const btns = [...document.querySelectorAll('button')];
+    return btns.some(b => b.textContent.includes(iconText));
+  }, ratioIcon, { timeout: 5000 }).catch(() => null);
+  await humanPause(400, 800);
+
+  // Check + click ratio nếu chưa active
   const ratioCheck = await page.evaluate((iconText) => {
     const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes(iconText));
-    return btn ? { found: true, active: btn.getAttribute('data-state') === 'active' } : { found: false };
+    return btn ? { found: true, active: btn.getAttribute('data-state') === 'active' || btn.getAttribute('aria-pressed') === 'true' } : { found: false };
   }, ratioIcon);
   if (ratioCheck.found && !ratioCheck.active) {
     console.log(`  [setup] click ratio ${ratio}`);
@@ -622,12 +673,14 @@ const ensureSettings = async (worker, { ratio = '9:16', count = 'x4' } = {}) => 
     await humanPause(400, 800);
   } else if (ratioCheck.active) {
     console.log(`  [setup] ✓ ratio ${ratio} đã active`);
+  } else {
+    console.warn(`  [setup] ⚠ không thấy nút ratio ${ratioIcon} trong popup`);
   }
 
   // Check + click count
   const countCheck = await page.evaluate((target) => {
     const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === target);
-    return btn ? { found: true, active: btn.getAttribute('data-state') === 'active' } : { found: false };
+    return btn ? { found: true, active: btn.getAttribute('data-state') === 'active' || btn.getAttribute('aria-pressed') === 'true' } : { found: false };
   }, count);
   if (countCheck.found && !countCheck.active) {
     console.log(`  [setup] click count ${count}`);
@@ -635,6 +688,8 @@ const ensureSettings = async (worker, { ratio = '9:16', count = 'x4' } = {}) => 
     await humanPause(400, 800);
   } else if (countCheck.active) {
     console.log(`  [setup] ✓ count ${count} đã active`);
+  } else {
+    console.warn(`  [setup] ⚠ không thấy nút count ${count} trong popup`);
   }
 
   await page.keyboard.press('Escape');
@@ -1453,12 +1508,26 @@ app.post('/api/p/:slug/override-prompt', wrapProjectHandler(handleOverridePrompt
 // ─── Edit blocks (setting/style) — sửa frames.json blocks trực tiếp ───
 const handleBlocks = async (proj, req, res) => {
   const { setting, style } = req.body || {};
-  // Đọc frames.json (raw) để giữ nguyên project meta + custom_frames merge
-  const raw = await fs.readFile(proj.framesPath, 'utf8');
-  const cfg = JSON.parse(raw);
+  // Đọc frames.json (raw) để giữ nguyên project meta + custom_frames merge.
+  // Defensive: nếu frames.json missing (bootstrap fail trên máy B clone), tự bootstrap lại.
+  let cfg;
+  try {
+    const raw = await fs.readFile(proj.framesPath, 'utf8');
+    cfg = JSON.parse(raw);
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      console.warn(`[blocks ${proj.slug}] frames.json missing — re-bootstrap`);
+      bootstrapProject(proj);
+      const raw = await fs.readFile(proj.framesPath, 'utf8');
+      cfg = JSON.parse(raw);
+    } else {
+      throw e;
+    }
+  }
   cfg.blocks = cfg.blocks || {};
   if (typeof setting === 'string') cfg.blocks.setting = setting;
   if (typeof style === 'string') cfg.blocks.style = style;
+  await fs.mkdir(path.dirname(proj.framesPath), { recursive: true });
   await fs.writeFile(proj.framesPath, JSON.stringify(cfg, null, 2));
   console.log(`[blocks ${proj.slug}] saved — setting=${(cfg.blocks.setting || '').length}ch  style=${(cfg.blocks.style || '').length}ch`);
   res.json({ ok: true, blocks: cfg.blocks });
