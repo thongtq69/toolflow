@@ -1329,7 +1329,13 @@ app.post('/api/projects/:slug/reset-login', async (req, res) => {
     if (proj.jobs.size > 0 || proj.queue.length > 0) {
       return res.status(409).json({ error: `Project "${slug}" đang có job, stop trước rồi reset` });
     }
-    if (!proj.ctx) return res.status(400).json({ error: 'Project chưa launch browser ctx' });
+    // Auto-launch ctx + workers nếu chưa có (project mới tạo, separate profile fresh)
+    if (!proj.ctx || proj.pagePool.length === 0) {
+      console.log(`[reset-login ${slug}] ctx/pagePool chưa có → tự launch trước khi mở login`);
+      try { await launchProjectWorkers(proj); }
+      catch (e) { return res.status(500).json({ error: `Launch browser fail: ${e.message}. Check projectId UUID + browser dependencies.` }); }
+      if (!proj.ctx) return res.status(500).json({ error: `Launch browser ctx fail — projectId không hợp lệ?` });
+    }
     try {
       await proj.ctx.clearCookies();
       console.log(`[reset-login ${slug}] ✓ cleared cookies`);
