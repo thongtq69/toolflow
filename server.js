@@ -1093,12 +1093,7 @@ app.post('/api/reset', async (req, res) => {
 // SETUP / CONFIG (UI-driven first-run + runtime settings)
 // ────────────────────────────────────────────────────────────
 app.get('/api/config', async (req, res) => {
-  let hasCookies = false;
-  try {
-    const cookieFile = path.join(USER_DATA_DIR, 'Default', 'Cookies');
-    await fs.access(cookieFile);
-    hasCookies = true;
-  } catch {}
+  const hasCookies = await checkLoggedIn();
   let hasFrames = false;
   try { await fs.access(FRAMES_PATH); hasFrames = true; } catch {}
   res.json({
@@ -1242,10 +1237,25 @@ app.post('/api/setup/launch-browser', async (req, res) => {
   }
 });
 
+// Helper: detect login bằng ctx.cookies() — đáng tin hơn fs probe (path khác giữa Playwright versions)
+const checkLoggedIn = async () => {
+  if (!ctx) return false;
+  try {
+    const cookies = await ctx.cookies(['https://accounts.google.com', 'https://labs.google']);
+    // Cần ít nhất 1 cookie từ google domain với SID/session-like name
+    return cookies.some(c =>
+      /\.?google\.com$/.test(c.domain) &&
+      /^(SID|SAPISID|SSID|HSID|APISID|__Secure-)/i.test(c.name)
+    );
+  } catch (e) {
+    console.warn('[checkLoggedIn] failed:', e.message);
+    return false;
+  }
+};
+
 // Setup status (wizard sẽ poll cái này)
 app.get('/api/setup/status', async (req, res) => {
-  let hasCookies = false;
-  try { await fs.access(path.join(USER_DATA_DIR, 'Default', 'Cookies')); hasCookies = true; } catch {}
+  const hasCookies = await checkLoggedIn();
   let hasFrames = false;
   try { await fs.access(FRAMES_PATH); hasFrames = true; } catch {}
   res.json({
