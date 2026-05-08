@@ -142,7 +142,8 @@
 
       <!-- Edit action + refs panel -->
       <div id="edit-action-wrap" class="mb-3" style="display:none;">
-        <div class="flex items-center gap-2 mb-2">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+          <button id="btn-gen-this-frame" class="btn btn-emerald text-xs" title="Gen riêng frame này (không serial — chạy independent worker)">▶ Gen frame này</button>
           <button id="btn-edit-action" class="btn btn-zinc text-xs">✏ Edit action + refs</button>
           <span id="edit-action-status" class="text-[11px] text-zinc-500"></span>
         </div>
@@ -639,6 +640,12 @@ function renderCenter() {
   $('edit-action-wrap').style.display = '';
 
   const isViewMode = !!viewState.frameId && viewState.frameId !== j.frameId;
+  const isFrameRunning = (appState.jobs || []).some(jj => jj.frameId === f.frame_id && (jj.status === 'running' || jj.status === 'waiting_pick'));
+  const genBtn = $('btn-gen-this-frame');
+  if (genBtn) {
+    genBtn.disabled = isFrameRunning;
+    genBtn.textContent = isFrameRunning ? '⏳ Đang chạy...' : '▶ Gen frame này';
+  }
   const edited = hasOverride(f.frame_id);
   const overrideAction = edited ? appState.overrides[f.frame_id].action : null;
   const effectiveAction = overrideAction || f.action || '';
@@ -774,7 +781,7 @@ function renderViewMode(f) {
     $('empty-state').style.display = '';
     $('empty-state').innerHTML = `
       <div class="text-4xl mb-2">🎬</div>
-      <div class="text-sm">Frame chưa gen — click <b>▶ Gen</b> on header để chạy</div>
+      <div class="text-sm">Frame chưa gen — click <b>▶ Gen frame này</b> ở trên để chạy riêng frame này.</div>
     `;
     $('attempts-meta').textContent = '';
     return;
@@ -823,6 +830,29 @@ function renderViewMode(f) {
     grid.appendChild(card);
   });
 }
+
+// ─── Gen riêng 1 frame (batch mode 1 item) ───
+$('btn-gen-this-frame').onclick = async () => {
+  const frameId = viewState.frameId || appState.job?.frameId;
+  if (!frameId) return;
+  const f = appState.frames?.find(x => x.frame_id === frameId);
+  if (!f) return;
+
+  // Cảnh báo nếu default_reference chưa pick → bot sẽ skip ref → ảnh sai style
+  const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
+  const unmet = allRefs.filter(rid => !appState.state?.picked?.[rid]);
+  if (unmet.length > 0) {
+    const ok = confirm(
+      `${frameId} cần ref [${allRefs.join(', ')}] nhưng chưa pick: ${unmet.join(', ')}.\n\n` +
+      `Bot sẽ gen mà không upload các ref đó (style có thể sai). Tiếp tục?`
+    );
+    if (!ok) return;
+  }
+  const r = await api('/api/batch-start', { frame_ids: [frameId] });
+  if (r && !r.error) {
+    toast(`▶ Bắt đầu gen ${frameId}`, 'success');
+  }
+};
 
 // ─── Edit action + refs ───
 const editExtraRefs = new Set();
