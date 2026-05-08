@@ -1187,15 +1187,57 @@ app.put('/api/config', async (req, res) => {
   }
 });
 
+// Helper: đảm bảo có ít nhất 1 page sống. Nếu ctx hoặc page bị close (user đóng browser tay) → tự tạo lại.
+const ensureLivePage = async () => {
+  // Nếu ctx đã closed (browser killed) → relaunch
+  let ctxAlive = true;
+  try {
+    if (!ctx || (ctx.pages && !ctx.pages())) ctxAlive = false;
+    // Probe ctx by listing pages — if throws, ctx dead
+    const pages = ctx?.pages?.() || [];
+    if (!Array.isArray(pages)) ctxAlive = false;
+  } catch { ctxAlive = false; }
+
+  if (!ctxAlive) {
+    console.warn('[recover] ctx died → relaunching persistent context');
+    pagePool.length = 0;
+    try { await ctx?.close(); } catch {}
+    ctx = await chromium.launchPersistentContext(path.resolve(USER_DATA_DIR), {
+      headless: HEADLESS,
+      viewport: { width: 1280, height: 900 },
+      args: ['--disable-blink-features=AutomationControlled'],
+    });
+    const p = ctx.pages()[0] || await ctx.newPage();
+    pagePool.push({ page: p, busy: false, id: 'W1', settingsVerified: false });
+    console.log('[recover] ctx relaunched, W1 ready');
+  }
+
+  // Replace any closed pages in pool
+  for (const w of pagePool) {
+    if (w.page.isClosed?.()) {
+      console.warn(`[recover] ${w.id} page closed → creating new page`);
+      w.page = await ctx.newPage();
+      w.settingsVerified = false;
+    }
+  }
+  // Nếu pool rỗng → thêm 1 page
+  if (pagePool.length === 0) {
+    const p = await ctx.newPage();
+    pagePool.push({ page: p, busy: false, id: 'W1', settingsVerified: false });
+  }
+  return pagePool[0];
+};
+
 // Mở browser để user login Google manually
 app.post('/api/setup/launch-browser', async (req, res) => {
-  if (pagePool.length === 0) return res.status(503).json({ error: 'Browser chưa khởi tạo' });
   try {
+    const w = await ensureLivePage();
     const url = req.body?.url || PROJECT_URL || 'https://labs.google/fx/tools/flow';
-    await pagePool[0].page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await pagePool[0].page.bringToFront();
-    res.json({ ok: true, url });
+    await w.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    try { await w.page.bringToFront(); } catch {}
+    res.json({ ok: true, url, workerId: w.id });
   } catch (e) {
+    console.error('[setup/launch-browser] failed:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
