@@ -88,6 +88,8 @@
   .ref-chip.ref-chip-active { background: #1e3a8a; border-color: #60a5fa; color: #dbeafe; }
   .ref-chip.ref-chip-active.ref-chip-picked { background: #064e3b; border-color: #10b981; color: #d1fae5; }
   .ref-chip.ref-chip-active.ref-chip-hasoutput { background: #422006; border-color: #ca8a04; color: #fde68a; }
+  /* Chip ở vị trí 0 (= default) — viền vàng đậm hơn */
+  .ref-chip.ref-chip-default { box-shadow: inset 0 0 0 2px #fbbf24; }
   .ref-chip-empty { font-size: 11px; color: #52525b; font-style: italic; }
   /* project tabs */
   .proj-tab { padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; user-select: none; transition: all 0.12s; border: 1px solid transparent; color: #71717a; }
@@ -168,12 +170,11 @@
           <label class="text-[11px] text-zinc-500 mb-1 block">Action prompt (chỉ override action, không động setting/style)</label>
           <textarea id="edit-action-text" class="input mono w-full text-xs" rows="6"></textarea>
 
-          <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">Extra references (chọn tự do)</label>
+          <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">References (chọn tự do, click theo thứ tự — vị trí 1 ★ = default)</label>
           <div id="edit-extra-refs" class="flex flex-wrap gap-1 border border-zinc-800 rounded p-2 bg-zinc-950 min-h-[40px]"></div>
           <p class="text-[10px] text-zinc-500 mt-1">
-            <span class="text-emerald-400">✓ picked</span> = dùng variant đã pick ·
-            <span class="text-amber-400">◌ has output</span> = dùng v1.png fallback ·
-            <span class="text-zinc-500">⚠ empty</span> = chưa gen, sẽ skip lúc gen
+            <span class="text-amber-400">★ vị trí 1</span> = default · các vị trí sau = extra refs ·
+            <span class="text-emerald-400">✓ picked</span> · <span class="text-amber-400">◌ output</span> · <span class="text-zinc-500">⚠ chưa gen</span>
           </p>
 
           <div class="flex gap-2 mt-3">
@@ -652,19 +653,36 @@ function isCustomFrame(f) {
 function hasOverride(frameId) {
   const ov = appState.overrides?.[frameId];
   if (!ov) return false;
-  return !!(ov.action || (Array.isArray(ov.extra_references) && ov.extra_references.length > 0));
+  return !!(ov.action
+    || ('default_reference' in ov)
+    || (Array.isArray(ov.extra_references) && ov.extra_references.length > 0));
 }
 
-// Trả về list extra_references hiệu quả (override > frame def)
+// Trả về default_reference hiệu quả (override > frame def). Có thể là null nếu override clear.
+function effectiveDefault(f) {
+  const ov = appState.overrides?.[f.frame_id];
+  if (ov && 'default_reference' in ov) return ov.default_reference;
+  return f.default_reference || null;
+}
 function effectiveExtraRefs(f) {
   const ov = appState.overrides?.[f.frame_id];
   if (ov && Array.isArray(ov.extra_references)) return ov.extra_references;
   return Array.isArray(f.extra_references) ? f.extra_references : [];
 }
+// Tổng hợp ordered list: default đầu tiên, rồi extras (đã dedupe)
+function effectiveAllRefs(f) {
+  const def = effectiveDefault(f);
+  const extras = effectiveExtraRefs(f);
+  const out = [];
+  if (def) out.push(def);
+  for (const e of extras) if (e !== def && !out.includes(e)) out.push(e);
+  return out;
+}
 
-// Render multi-select chips — TẤT CẢ frame đều click được tự do.
-// 3 trạng thái: ✓ picked (xanh) / ◌ has output chưa pick (vàng nhẹ) / ⊘ chưa gen (mờ ⚠)
-function renderRefChips(container, frames, currentFrameId, selectedSet, onChange) {
+// Render multi-select chips ORDERED — vị trí 1 = default, các vị trí sau = extra refs.
+// `selectedOrder` là Array (giữ thứ tự click), không phải Set.
+// 3 trạng thái: ✓ picked (xanh) / ◌ has output (vàng) / ⚠ chưa gen (mờ).
+function renderRefChips(container, frames, currentFrameId, selectedOrder, onChange) {
   container.innerHTML = '';
   const candidates = frames.filter(f => f.frame_id !== currentFrameId);
   if (candidates.length === 0) {
@@ -674,7 +692,9 @@ function renderRefChips(container, frames, currentFrameId, selectedSet, onChange
   candidates.forEach(f => {
     const isPicked = !!appState.state?.picked?.[f.frame_id];
     const hasOutput = !!f.has_output;
-    const active = selectedSet.has(f.frame_id);
+    const orderIdx = selectedOrder.indexOf(f.frame_id);
+    const active = orderIdx >= 0;
+    const isDefault = orderIdx === 0; // vị trí 0 = default
 
     let icon = '';
     let cls = 'ref-chip';
@@ -682,27 +702,33 @@ function renderRefChips(container, frames, currentFrameId, selectedSet, onChange
     if (isPicked) {
       icon = ' ✓';
       cls += ' ref-chip-picked';
-      tip = active ? 'Đã pick — Click để BỎ' : 'Đã pick variant — Click để thêm (dùng variant đã pick)';
+      tip = active ? 'Đã pick — Click để BỎ' : 'Đã pick variant — Click để thêm';
     } else if (hasOutput) {
       icon = ' ◌';
       cls += ' ref-chip-hasoutput';
-      tip = active ? 'Có output (chưa pick) — Click để BỎ' : 'Có gen rồi nhưng chưa pick — Click để thêm (bot dùng v1.png fallback)';
+      tip = active ? 'Có output — Click để BỎ' : 'Có v1.png fallback — Click để thêm';
     } else {
       icon = ' ⚠';
       cls += ' ref-chip-empty-state';
-      tip = active ? 'Chưa gen — vẫn dùng được nếu sau này có (bot sẽ skip nếu vẫn trống lúc gen)' : 'Frame chưa gen lần nào — Click để add (sẽ skip nếu chưa có lúc gen)';
+      tip = active ? 'Chưa gen — Click để BỎ' : 'Chưa gen lần nào — Click để add (skip lúc gen)';
     }
     if (active) cls += ' ref-chip-active';
+    if (isDefault) cls += ' ref-chip-default';
 
     const chip = document.createElement('span');
     chip.className = cls;
-    chip.textContent = f.frame_id + icon;
-    chip.title = tip;
+    let label = f.frame_id + icon;
+    if (active) {
+      label = (isDefault ? '★ ' : `${orderIdx + 1}. `) + label;
+    }
+    chip.textContent = label;
+    chip.title = isDefault ? `★ DEFAULT (vị trí 1) — ${tip}` : (active ? `Vị trí ${orderIdx + 1} — ${tip}` : tip);
     chip.onclick = () => {
-      if (selectedSet.has(f.frame_id)) selectedSet.delete(f.frame_id);
-      else selectedSet.add(f.frame_id);
-      renderRefChips(container, frames, currentFrameId, selectedSet, onChange);
-      if (onChange) onChange(selectedSet);
+      const i = selectedOrder.indexOf(f.frame_id);
+      if (i >= 0) selectedOrder.splice(i, 1);
+      else selectedOrder.push(f.frame_id);
+      renderRefChips(container, frames, currentFrameId, selectedOrder, onChange);
+      if (onChange) onChange(selectedOrder);
     };
     container.appendChild(chip);
   });
@@ -737,7 +763,7 @@ function renderFrameList() {
       </div>
       <div class="text-xs text-zinc-500 mt-0.5 truncate">${escapeHtml(f.topic || '')}</div>
       ${(() => {
-        const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
+        const allRefs = effectiveAllRefs(f);
         return allRefs.length ? `<div class="text-[10px] text-zinc-600 mt-0.5">↳ ref: ${escapeHtml(allRefs.join(', '))}</div>` : '';
       })()}
     `;
@@ -809,7 +835,7 @@ function renderCenter() {
     (isCustomFrame(f) ? ' <span class="badge badge-custom">custom</span>' : '') +
     (isViewMode ? ' <span class="badge badge-pending">view</span>' : '');
   $('cur-topic').textContent = f.topic || '';
-  const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
+  const allRefs = effectiveAllRefs(f);
   $('cur-refs').textContent = allRefs.length ? `refs: ${allRefs.join(', ')}` : 'no ref';
 
   const fullPrompt = `${appState.blocks?.setting || ''}\n\n${appState.blocks?.style || ''}\n\n${effectiveAction}`;
@@ -994,7 +1020,7 @@ $('btn-gen-this-frame').onclick = async () => {
 
   // Cảnh báo chỉ khi ref chưa gen lần nào (không có v1.png + chưa pick)
   // Has output (chưa pick) → bot tự fallback v1.png, không cần warn
-  const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
+  const allRefs = effectiveAllRefs(f);
   const empty = allRefs.filter(rid => {
     const rf = appState.frames?.find(x => x.frame_id === rid);
     return !rf || (!appState.state?.picked?.[rid] && !rf.has_output);
@@ -1012,20 +1038,17 @@ $('btn-gen-this-frame').onclick = async () => {
   }
 };
 
-// ─── Edit action + refs ───
-const editExtraRefs = new Set();
+// ─── Edit action + refs (refs ordered, vị trí 0 = default) ───
+let editRefsOrder = []; // ordered array of frame IDs
 $('btn-edit-action').onclick = () => {
   const frameId = viewState.frameId || appState.job?.frameId;
   const f = appState.frames?.find(x => x.frame_id === frameId);
   if (!f) return;
   const ov = appState.overrides?.[frameId];
   $('edit-action-text').value = (ov && ov.action) || f.action || '';
-  // Populate extra refs từ override > frame def
-  editExtraRefs.clear();
-  effectiveExtraRefs(f).forEach(id => editExtraRefs.add(id));
-  // Loại trừ default_reference khỏi candidates (đã có rồi)
-  const candidates = (appState.frames || []).filter(x => x.frame_id !== f.default_reference);
-  renderRefChips($('edit-extra-refs'), candidates, frameId, editExtraRefs);
+  // Init order: default trước, rồi extra (đã dedupe). Show TẤT CẢ frame (trừ frame hiện tại).
+  editRefsOrder = effectiveAllRefs(f);
+  renderRefChips($('edit-extra-refs'), appState.frames || [], frameId, editRefsOrder);
   $('edit-action-form').style.display = '';
 };
 $('btn-cancel-action').onclick = () => { $('edit-action-form').style.display = 'none'; };
@@ -1034,15 +1057,21 @@ $('btn-save-action').onclick = async () => {
   if (!frameId) return;
   const f = appState.frames?.find(x => x.frame_id === frameId);
   const text = $('edit-action-text').value.trim();
-  // action: '' nếu unchanged from default thì clear, ngược lại lưu
   const actionVal = (text && text !== (f?.action || '').trim()) ? text : '';
-  const refsVal = [...editExtraRefs];
-  const body = { frame_id: frameId, action: actionVal, extra_references: refsVal };
+  // Pack refs: vị trí 0 = default_reference, còn lại = extra_references
+  const newDefault = editRefsOrder[0] || null;
+  const newExtras = editRefsOrder.slice(1);
+  const body = { frame_id: frameId, action: actionVal, extra_references: newExtras };
+  // Chỉ override default_reference khi user thay đổi (so với frame.default_reference)
+  if (newDefault !== (f?.default_reference || null)) {
+    body.default_reference = newDefault; // có thể null = bỏ default
+  }
   const r = await api('/api/override-prompt', body);
   if (r && !r.error) {
     const parts = [];
     if (actionVal) parts.push('action');
-    if (refsVal.length) parts.push(`${refsVal.length} extra refs`);
+    if ('default_reference' in body) parts.push('default→' + (newDefault || 'null'));
+    if (newExtras.length) parts.push(`${newExtras.length} extra refs`);
     toast(parts.length ? `Đã lưu override: ${parts.join(' + ')}` : 'Đã xoá override', 'success');
     $('edit-action-form').style.display = 'none';
     fetchState();
@@ -1051,8 +1080,8 @@ $('btn-save-action').onclick = async () => {
 $('btn-clear-action').onclick = async () => {
   const frameId = viewState.frameId || appState.job?.frameId;
   if (!frameId) return;
-  if (!confirm(`Xoá tất cả override (action + extra refs) cho ${frameId}?`)) return;
-  const r = await api('/api/override-prompt', { frame_id: frameId, action: '', extra_references: [] });
+  if (!confirm(`Xoá tất cả override (action + default + extra refs) cho ${frameId}? Frame sẽ về bản gốc frames.json.`)) return;
+  const r = await api('/api/override-prompt', { frame_id: frameId, _clear: true });
   if (r && !r.error) {
     toast('Đã xoá override', 'success');
     $('edit-action-form').style.display = 'none';
@@ -1061,13 +1090,15 @@ $('btn-clear-action').onclick = async () => {
 };
 
 // ─── Add new frame ───
-const newFrameExtraRefs = new Set();
+let newFrameExtraRefs = []; // ordered array (extra refs only, default trong dropdown riêng)
 const refreshNewFrameExtraRefsChips = () => {
   const defaultRef = $('nf-ref').value || null;
-  // Loại default_reference khỏi candidates để tránh duplicate
   const candidates = (appState.frames || []).filter(f => f.frame_id !== defaultRef);
-  // Nếu user vừa đổi defaultRef → bỏ nó khỏi extra set (nếu có)
-  if (defaultRef && newFrameExtraRefs.has(defaultRef)) newFrameExtraRefs.delete(defaultRef);
+  // Nếu user đổi default → bỏ default ra khỏi extra (tránh duplicate)
+  if (defaultRef) {
+    const i = newFrameExtraRefs.indexOf(defaultRef);
+    if (i >= 0) newFrameExtraRefs.splice(i, 1);
+  }
   renderRefChips($('nf-extra-refs'), candidates, '__NEW__', newFrameExtraRefs);
 };
 $('btn-add-frame').onclick = () => {
@@ -1077,7 +1108,7 @@ $('btn-add-frame').onclick = () => {
   $('nf-files').value = '';
   $('nf-files-preview').innerHTML = '';
   newFrameUploadedRefs.length = 0;
-  newFrameExtraRefs.clear();
+  newFrameExtraRefs.length = 0;
   // populate ref dropdown
   const sel = $('nf-ref');
   sel.innerHTML = '<option value="">— no ref —</option>';
@@ -1152,7 +1183,7 @@ $('btn-submit-add').onclick = async () => {
   if (!action) { toast('Action prompt không được rỗng', 'error'); return; }
   const body = { frame_id, topic, action, default_reference };
   if (newFrameUploadedRefs.length > 0) body.reference_files = [...newFrameUploadedRefs];
-  if (newFrameExtraRefs.size > 0) body.extra_references = [...newFrameExtraRefs];
+  if (newFrameExtraRefs.length > 0) body.extra_references = [...newFrameExtraRefs];
   const r = await api('/api/add-frame', body);
   if (r && !r.error) {
     const parts = [];

@@ -768,6 +768,9 @@ const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
   const overrides = await loadOverrides(proj);
   const ov = overrides[f.frame_id] || {};
   const effectiveAction = ov.action || f.action;
+  // Override có thể có default_reference riêng (kể cả null = bỏ default). 'default_reference' in ov
+  // dùng để phân biệt "không override default" vs "override null".
+  const effectiveDefault = ('default_reference' in ov) ? ov.default_reference : f.default_reference;
   const effectiveExtraRefs = Array.isArray(ov.extra_references)
     ? ov.extra_references
     : (Array.isArray(f.extra_references) ? f.extra_references : []);
@@ -790,15 +793,15 @@ const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
     if (fsSync.existsSync(v1)) return { path: v1, source: 'v1-fallback' };
     return null;
   };
-  if (f.default_reference) {
-    const r = resolveFrameRef(f.default_reference);
+  if (effectiveDefault) {
+    const r = resolveFrameRef(effectiveDefault);
     if (r) {
       refs.push(r.path);
-      if (r.source === 'v1-fallback') console.log(`[refs ${proj.slug}] ${f.frame_id}: default_reference ${f.default_reference} chưa pick → dùng v1.png fallback`);
-    } else console.warn(`[refs ${proj.slug}] ${f.frame_id}: default_reference ${f.default_reference} chưa gen — skip`);
+      if (r.source === 'v1-fallback') console.log(`[refs ${proj.slug}] ${f.frame_id}: default_reference ${effectiveDefault} chưa pick → dùng v1.png fallback`);
+    } else console.warn(`[refs ${proj.slug}] ${f.frame_id}: default_reference ${effectiveDefault} chưa gen — skip`);
   }
   for (const fid of effectiveExtraRefs) {
-    if (fid === f.default_reference) continue; // dedupe
+    if (fid === effectiveDefault) continue; // dedupe
     const r = resolveFrameRef(fid);
     if (r) {
       refs.push(r.path);
@@ -1107,7 +1110,9 @@ const handleState = async (proj, req, res) => {
     let status = 'pending';
     if (jobsByFrame[f.frame_id]) status = jobsByFrame[f.frame_id].status;
     else if (picked) status = 'picked';
-    const hasOv = !!(override?.action || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
+    const hasOv = !!(override?.action
+      || (override && 'default_reference' in override)
+      || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
     // Có ảnh trên đĩa? (đã gen ít nhất 1 lần — kể cả chưa pick)
     const hasOutput = fsSync.existsSync(path.join(proj.outputDir, f.frame_id, 'v1.png'));
     return { ...f, status, picked, override, has_override: hasOv, has_output: hasOutput };
@@ -1189,14 +1194,33 @@ app.post('/api/p/:slug/repick', wrapProjectHandler(handleRepick));
 
 // ─── Save / clear frame override (action prompt + extra_references) ───
 const handleOverridePrompt = async (proj, req, res) => {
-  const { frame_id, action, extra_references } = req.body || {};
+  const body = req.body || {};
+  const { frame_id, action, default_reference, extra_references, _clear } = body;
   if (!frame_id) return res.status(400).json({ error: 'frame_id bắt buộc' });
   const overrides = await loadOverrides(proj);
+
+  // Special: _clear: true → xoá hoàn toàn override entry, frame về lại bản gốc frames.json
+  if (_clear) {
+    delete overrides[frame_id];
+    await saveOverrides(proj, overrides);
+    console.log(`[override ${proj.slug}] cleared ${frame_id} (all fields)`);
+    return res.json({ ok: true, overrides });
+  }
+
   const cur = { ...(overrides[frame_id] || {}) };
 
   if (action !== undefined) {
     if (action === '') delete cur.action;
     else cur.action = action;
+  }
+  // default_reference override: undefined = không thay đổi, null/'' = bỏ default, string = override
+  // Body field 'default_reference' present (kể cả null) → áp dụng. Dùng 'in' để phân biệt.
+  if ('default_reference' in (req.body || {})) {
+    if (default_reference == null || default_reference === '') {
+      cur.default_reference = null; // explicit null = bỏ default
+    } else {
+      cur.default_reference = default_reference;
+    }
   }
   if (extra_references !== undefined) {
     if (!Array.isArray(extra_references) || extra_references.length === 0) delete cur.extra_references;
@@ -1204,12 +1228,13 @@ const handleOverridePrompt = async (proj, req, res) => {
   }
 
   const hasContent = cur.action != null
+    || 'default_reference' in cur
     || (Array.isArray(cur.extra_references) && cur.extra_references.length > 0);
 
   if (hasContent) {
     cur.updatedAt = new Date().toISOString();
     overrides[frame_id] = cur;
-    console.log(`[override ${proj.slug}] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  extra_refs=${(cur.extra_references || []).join(',') || '-'}`);
+    console.log(`[override ${proj.slug}] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  default=${cur.default_reference ?? (('default_reference' in cur) ? 'null' : '-')}  extra_refs=${(cur.extra_references || []).join(',') || '-'}`);
   } else {
     delete overrides[frame_id];
     console.log(`[override ${proj.slug}] cleared ${frame_id}`);
