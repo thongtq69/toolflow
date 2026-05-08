@@ -58,6 +58,41 @@ const humanPause = (min = 800, max = 2400) => sleep(rand(min, max));
 const lastGenByProfile = new Map();
 let lastGenAt = 0; // legacy global, vẫn ghi để giữ backward-compat
 
+// ─── Submit-slot serialization PER-PROFILE ───
+// Flow rate-limit theo REQUEST RATE (≈4-6 req/sec/account), không phải total count.
+// 1 worker click submit → 4 requests fire trong <1s. N workers cùng click → N×4 req
+// trong <1s → 429 (test xác nhận: 7 workers = 28 req/s = HARD ban).
+// Fix: serialize submit clicks per-profile với gap min, để spread requests ra time.
+// Workers vẫn parallel gen (mỗi gen ~30-60s), chỉ submit moments stagger nhau.
+const profileSubmitState = new Map(); // profileDir → { chain: Promise, lastAt: number }
+// Gap min giữa 2 submits trên cùng profile (test thực tế trên Flow:
+// 4.5s → 2/7 success; 12s → 5/7; 15s → expected 7/7)
+// Configurable via env SUBMIT_GAP_MS để anh tune theo Flow rate-limit thực tế.
+const SUBMIT_GAP_MS = parseInt(process.env.SUBMIT_GAP_MS, 10) || 15000;
+
+const withSubmitSlot = async (profilePath, fn) => {
+  let state = profileSubmitState.get(profilePath);
+  if (!state) {
+    state = { chain: Promise.resolve(), lastAt: 0 };
+    profileSubmitState.set(profilePath, state);
+  }
+  const myTurn = state.chain.then(async () => {
+    const elapsed = Date.now() - state.lastAt;
+    if (state.lastAt > 0 && elapsed < SUBMIT_GAP_MS) {
+      const wait = SUBMIT_GAP_MS - elapsed;
+      console.log(`  [submit-slot ${path.basename(profilePath)}] wait ${wait}ms cho slot trống`);
+      await sleep(wait);
+    }
+    try {
+      return await fn();
+    } finally {
+      state.lastAt = Date.now();
+    }
+  });
+  state.chain = myTurn.catch(() => {});
+  return await myTurn;
+};
+
 // ─── Project registry + per-project state ───
 const PROJECTS_REGISTRY_PATH = resolveDir('./projects.json');
 const projects = new Map(); // slug → project state
@@ -867,8 +902,15 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
     await humanPause(300, 800);
   }
 
-  await createBtn.click({ timeout: 10000 });
-  console.log(`    [click 1/${burstCount}] submitted at ${new Date().toISOString()}`);
+  // Submit-slot per-profile: serialize click Create giữa workers cùng account để
+  // tránh burst rate-limit (Flow chấp nhận 4-6 req/sec/account, 7+ workers cùng
+  // click → 28+ req/sec → 429). Gap 4.5s giữa 2 submits đảm bảo Flow xử lý kịp.
+  await withSubmitSlot(profilePath, async () => {
+    await createBtn.click({ timeout: 10000 });
+    console.log(`    [click 1/${burstCount}] ${wid} submitted at ${new Date().toISOString()}`);
+    // Đợi 4 requests fire xong (~0.8-1.2s) trước khi nhường slot cho worker khác
+    await sleep(1200);
+  });
 
   // Burst rounds 2+: click button "Sử dụng lại câu lệnh" trên thumbnail (undo/redo
   // icon) → Flow restore CẢ prompt + reference image (chip) vào prompt bar. Sau đó
@@ -894,9 +936,12 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
       if (restored.ok) {
         // Đợi prompt + ref được fill vào textbox + ref chip render xong
         await sleep(rand(700, 1100));
-        const btn = await findCreateButton(page);
-        await btn.click({ timeout: 8000 });
-        console.log(`    [click ${i}/${burstCount}] via "Sử dụng lại câu lệnh" → submitted (${restored.count} buttons available)`);
+        await withSubmitSlot(profilePath, async () => {
+          const btn = await findCreateButton(page);
+          await btn.click({ timeout: 8000 });
+          console.log(`    [click ${i}/${burstCount}] ${wid} via "Sử dụng lại câu lệnh" → submitted`);
+          await sleep(1200);
+        });
       } else {
         // Fallback: prompt bar empty (no ref + no history) → re-type prompt
         const tb = await findPromptTextbox(page);
@@ -907,9 +952,12 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
         await sleep(rand(200, 400));
         await page.keyboard.insertText(prompt);
         await sleep(rand(400, 800));
-        const btn = await findCreateButton(page);
-        await btn.click({ timeout: 8000 });
-        console.log(`    [click ${i}/${burstCount}] fallback re-type → submitted (no reuse button found)`);
+        await withSubmitSlot(profilePath, async () => {
+          const btn = await findCreateButton(page);
+          await btn.click({ timeout: 8000 });
+          console.log(`    [click ${i}/${burstCount}] ${wid} fallback re-type → submitted`);
+          await sleep(1200);
+        });
       }
     } catch (e) {
       console.warn(`    [burst ${i}/${burstCount}] re-submit fail: ${e.message.split('\n')[0]} — dừng burst (vẫn nhận response từ ${i - 1} lượt trước)`);
