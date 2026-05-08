@@ -4,7 +4,10 @@
 <meta charset="utf-8">
 <title>VideoFlow — Frame Bank</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="/tailwind.js"></script>
+<!-- Self-hosted Tailwind (bypass adblock/extension chặn cdn.tailwindcss.com).
+     Fallback nếu file local lỗi → load CDN. -->
+<script>if (typeof tailwind === 'undefined') { document.write('<scr'+'ipt src="https://cdn.tailwindcss.com"></scr'+'ipt>'); }</script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace; }
