@@ -174,22 +174,44 @@ const pagePool = new Proxy([], {
     return true; // swallow other writes silently
   },
 });
+// Recover worker page nếu bị user đóng. Handle cả case ctx chết hoàn toàn.
+const recoverWorkerPage = async (proj, w) => {
+  let projCtx = proj.ctx || ctx;
+  let ctxAlive = false;
+  try {
+    if (projCtx) { projCtx.pages(); ctxAlive = true; }
+  } catch { ctxAlive = false; }
+
+  if (!ctxAlive) {
+    // Ctx chết hoàn toàn → relaunch
+    const profilePath = proj.profileDir
+      ? path.resolve(proj.profileDir)
+      : path.resolve(USER_DATA_DIR);
+    console.warn(`[recover ${proj.slug}] ctx dead → relaunching profile ${profilePath}`);
+    ctxByProfile.delete(profilePath);
+    try { await projCtx?.close(); } catch {}
+    projCtx = await launchCtx(profilePath);
+    proj.ctx = projCtx;
+    if (!proj.profileDir) ctx = projCtx; // share global ctx
+  }
+
+  console.warn(`[recover ${proj.slug}] ${w.id} → new page`);
+  w.page = await projCtx.newPage();
+  await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  w.settingsVerified = false;
+};
+
 const acquireWorker = async (proj) => {
   if (!proj) proj = defaultProject();
   while (true) {
     const w = proj.pagePool.find(w => !w.busy);
     if (w) {
-      // Recover: nếu page bị user đóng tay → tạo page mới + nav về project URL
       if (w.page?.isClosed?.()) {
         try {
-          const projCtx = proj.ctx || ctx;
-          console.warn(`[acquireWorker ${proj.slug}] ${w.id} page closed → recreate`);
-          w.page = await projCtx.newPage();
-          await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          w.settingsVerified = false;
+          await recoverWorkerPage(proj, w);
         } catch (e) {
-          console.error(`[acquireWorker ${proj.slug}] ${w.id} recreate fail: ${e.message}`);
-          // Vẫn return để tránh deadlock; gen sẽ fail nhưng có error rõ
+          console.error(`[acquireWorker ${proj.slug}] ${w.id} recover failed: ${e.message}`);
+          // Vẫn return — gen sẽ fail clean với error rõ, không deadlock infinite
         }
       }
       w.busy = true;
@@ -1702,45 +1724,52 @@ app.put('/api/config', async (req, res) => {
   }
 });
 
-// Helper: đảm bảo có ít nhất 1 page sống. Nếu ctx hoặc page bị close (user đóng browser tay) → tự tạo lại.
+// Helper: đảm bảo default project có ít nhất 1 page sống. Dùng cho setup wizard.
+// Handle ctx chết hoàn toàn (clear ctxByProfile cache + relaunch).
 const ensureLivePage = async () => {
-  // Nếu ctx đã closed (browser killed) → relaunch
-  let ctxAlive = true;
+  const dp = defaultProject();
+  if (!dp) throw new Error('No default project');
+  const sharedAbsProfile = path.resolve(USER_DATA_DIR);
+
+  // Probe ctx alive
+  let ctxAlive = false;
   try {
-    if (!ctx || (ctx.pages && !ctx.pages())) ctxAlive = false;
-    // Probe ctx by listing pages — if throws, ctx dead
-    const pages = ctx?.pages?.() || [];
-    if (!Array.isArray(pages)) ctxAlive = false;
+    if (ctx) { ctx.pages(); ctxAlive = true; }
   } catch { ctxAlive = false; }
 
   if (!ctxAlive) {
-    console.warn('[recover] ctx died → relaunching persistent context');
-    pagePool.length = 0;
+    console.warn('[recover] global ctx died → relaunching persistent context');
+    // Clear stale entry in cache
+    ctxByProfile.delete(sharedAbsProfile);
     try { await ctx?.close(); } catch {}
-    ctx = await chromium.launchPersistentContext(path.resolve(USER_DATA_DIR), {
-      headless: HEADLESS,
-      viewport: { width: 1280, height: 900 },
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
+    // Reset all default project's worker references (pages were tied to dead ctx)
+    dp.pagePool.length = 0;
+    ctx = await launchCtx(sharedAbsProfile);
+    dp.ctx = ctx;
     const p = ctx.pages()[0] || await ctx.newPage();
-    pagePool.push({ page: p, busy: false, id: 'W1', settingsVerified: false });
-    console.log('[recover] ctx relaunched, W1 ready');
+    dp.pagePool.push({ page: p, busy: false, id: 'default-W1', settingsVerified: false, projectSlug: 'default' });
+    console.log('[recover] ctx relaunched, default-W1 ready');
   }
 
-  // Replace any closed pages in pool
-  for (const w of pagePool) {
-    if (w.page.isClosed?.()) {
+  // Replace any closed pages
+  for (const w of dp.pagePool) {
+    if (w.page?.isClosed?.()) {
       console.warn(`[recover] ${w.id} page closed → creating new page`);
-      w.page = await ctx.newPage();
-      w.settingsVerified = false;
+      try {
+        w.page = await ctx.newPage();
+        w.settingsVerified = false;
+      } catch (e) {
+        // If newPage fails, ctx might be dead again → mark for next call
+        console.error(`[recover] newPage fail: ${e.message}`);
+        ctxAlive = false;
+      }
     }
   }
-  // Nếu pool rỗng → thêm 1 page
-  if (pagePool.length === 0) {
+  if (dp.pagePool.length === 0) {
     const p = await ctx.newPage();
-    pagePool.push({ page: p, busy: false, id: 'W1', settingsVerified: false });
+    dp.pagePool.push({ page: p, busy: false, id: 'default-W1', settingsVerified: false, projectSlug: 'default' });
   }
-  return pagePool[0];
+  return dp.pagePool[0];
 };
 
 // Mở browser để user login Google manually
