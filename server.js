@@ -619,16 +619,30 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
   const overrides = await loadOverrides();
   const ov = overrides[f.frame_id] || {};
   const effectiveAction = ov.action || f.action;
+  const effectiveExtraRefs = Array.isArray(ov.extra_references)
+    ? ov.extra_references
+    : (Array.isArray(f.extra_references) ? f.extra_references : []);
   const fullPrompt = `${cfg.blocks.setting}\n\n${cfg.blocks.style}\n\n${effectiveAction}`;
 
   const state = await loadState();
   const refs = [];
-  if (f.default_reference && state.picked?.[f.default_reference]) {
-    const picked = state.picked[f.default_reference];
-    const refLocal = picked.filePath
+  const resolvePickedPath = (frameId) => {
+    const picked = state.picked?.[frameId];
+    if (!picked) return null;
+    return picked.filePath
       ? (path.isAbsolute(picked.filePath) ? picked.filePath : path.join(OUTPUT_DIR, picked.filePath))
-      : path.join(OUTPUT_DIR, f.default_reference, `v${(picked.pickedIdx ?? 0) + 1}.png`);
-    refs.push(refLocal);
+      : path.join(OUTPUT_DIR, frameId, `v${(picked.pickedIdx ?? 0) + 1}.png`);
+  };
+  if (f.default_reference) {
+    const p = resolvePickedPath(f.default_reference);
+    if (p) refs.push(p);
+    else console.warn(`[refs] ${f.frame_id}: default_reference ${f.default_reference} chưa được pick — skip`);
+  }
+  for (const fid of effectiveExtraRefs) {
+    if (fid === f.default_reference) continue; // dedupe
+    const p = resolvePickedPath(fid);
+    if (p) refs.push(p);
+    else console.warn(`[refs] ${f.frame_id}: extra_reference ${fid} chưa được pick — skip`);
   }
   if (Array.isArray(f.reference_files)) {
     for (const rf of f.reference_files) {
@@ -817,7 +831,8 @@ app.get('/api/state', async (req, res) => {
       let status = 'pending';
       if (jobsByFrame[f.frame_id]) status = jobsByFrame[f.frame_id].status;
       else if (picked) status = 'picked';
-      return { ...f, status, picked, override, has_override: !!override?.action };
+      const hasOv = !!(override?.action || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
+      return { ...f, status, picked, override, has_override: hasOv };
     });
     res.json({
       frames: framesWithStatus,
@@ -896,18 +911,38 @@ app.post('/api/repick', async (req, res) => {
   }
 });
 
-// ─── Save / clear prompt override ───
+// ─── Save / clear frame override (action prompt + extra_references) ───
+// Body: { frame_id, action?, extra_references? }
+//   - action === ''  → clear action override
+//   - action === undefined → don't touch action
+//   - extra_references === [] → clear refs override
+//   - extra_references === undefined → don't touch refs
 app.post('/api/override-prompt', async (req, res) => {
   try {
-    const { frame_id, action } = req.body || {};
+    const { frame_id, action, extra_references } = req.body || {};
     if (!frame_id) return res.status(400).json({ error: 'frame_id bắt buộc' });
     const overrides = await loadOverrides();
-    if (action == null || action === '') {
+    const cur = { ...(overrides[frame_id] || {}) };
+
+    if (action !== undefined) {
+      if (action === '') delete cur.action;
+      else cur.action = action;
+    }
+    if (extra_references !== undefined) {
+      if (!Array.isArray(extra_references) || extra_references.length === 0) delete cur.extra_references;
+      else cur.extra_references = [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim()))];
+    }
+
+    const hasContent = cur.action != null
+      || (Array.isArray(cur.extra_references) && cur.extra_references.length > 0);
+
+    if (hasContent) {
+      cur.updatedAt = new Date().toISOString();
+      overrides[frame_id] = cur;
+      console.log(`[override] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  extra_refs=${(cur.extra_references || []).join(',') || '-'}`);
+    } else {
       delete overrides[frame_id];
       console.log(`[override] cleared ${frame_id}`);
-    } else {
-      overrides[frame_id] = { action, updatedAt: new Date().toISOString() };
-      console.log(`[override] ${frame_id} updated (${action.length} chars)`);
     }
     await saveOverrides(overrides);
     res.json({ ok: true, overrides });
@@ -919,18 +954,22 @@ app.post('/api/override-prompt', async (req, res) => {
 // ─── Add custom frame ───
 app.post('/api/add-frame', async (req, res) => {
   try {
-    const { frame_id, topic, action, default_reference, reference_files = [] } = req.body || {};
+    const { frame_id, topic, action, default_reference, reference_files = [], extra_references = [] } = req.body || {};
     if (!frame_id || !action) return res.status(400).json({ error: 'frame_id và action bắt buộc' });
     // Conflict với builtin frames hoặc existing custom?
     const cfg = await loadFrames();
     if (cfg.frames.some(f => f.frame_id === frame_id)) return res.status(409).json({ error: `frame_id "${frame_id}" đã tồn tại` });
     const custom = await loadCustomFrames();
+    const cleanExtraRefs = Array.isArray(extra_references)
+      ? [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim() && x !== default_reference))]
+      : [];
     custom.push({
       frame_id,
       tag: `[${frame_id}-CUSTOM]`,
       topic: topic || frame_id,
       default_reference: default_reference || null,
-      selectable_references: default_reference ? [default_reference] : [],
+      extra_references: cleanExtraRefs,
+      selectable_references: [default_reference, ...cleanExtraRefs].filter(Boolean),
       extra_anchor: null,
       action,
       reference_files,

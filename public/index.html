@@ -75,6 +75,13 @@
   .check-icon { color: #10b981; font-size: 16px; }
   .wizard-hint { font-size: 11px; color: #71717a; margin-top: 4px; }
   .restart-warn { background: #422006; border: 1px solid #d97706; color: #fbbf24; padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-top: 8px; }
+  /* ref chip — multi-select cho extra_references */
+  .ref-chip { padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; border: 1px solid #3f3f46; background: #18181b; color: #a1a1aa; cursor: pointer; user-select: none; transition: all 0.12s; }
+  .ref-chip:hover { border-color: #60a5fa; color: #e4e4e7; }
+  .ref-chip.ref-chip-active { background: #1e3a8a; border-color: #60a5fa; color: #dbeafe; }
+  .ref-chip.ref-chip-disabled { opacity: 0.4; cursor: not-allowed; }
+  .ref-chip.ref-chip-disabled:hover { border-color: #3f3f46; color: #a1a1aa; }
+  .ref-chip-empty { font-size: 11px; color: #52525b; font-style: italic; }
 </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 h-screen overflow-hidden flex flex-col">
@@ -133,16 +140,21 @@
         <div id="cur-prompt" class="mt-2 whitespace-pre-wrap break-words"></div>
       </details>
 
-      <!-- Edit action panel -->
+      <!-- Edit action + refs panel -->
       <div id="edit-action-wrap" class="mb-3" style="display:none;">
         <div class="flex items-center gap-2 mb-2">
-          <button id="btn-edit-action" class="btn btn-zinc text-xs">✏ Edit action</button>
+          <button id="btn-edit-action" class="btn btn-zinc text-xs">✏ Edit action + refs</button>
           <span id="edit-action-status" class="text-[11px] text-zinc-500"></span>
         </div>
         <div id="edit-action-form" style="display:none;" class="bg-zinc-950 rounded p-3 border border-zinc-800">
           <label class="text-[11px] text-zinc-500 mb-1 block">Action prompt (chỉ override action, không động setting/style)</label>
-          <textarea id="edit-action-text" class="input mono w-full text-xs" rows="6" placeholder="Để trống và Save để xoá override"></textarea>
-          <div class="flex gap-2 mt-2">
+          <textarea id="edit-action-text" class="input mono w-full text-xs" rows="6"></textarea>
+
+          <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">Extra references (multi-select frame đã pick)</label>
+          <div id="edit-extra-refs" class="flex flex-wrap gap-1 border border-zinc-800 rounded p-2 bg-zinc-950 min-h-[40px]"></div>
+          <p class="text-[10px] text-zinc-500 mt-1">Bot sẽ upload các frame này cùng với default reference. Frame chưa pick sẽ bị skip (warning trong log).</p>
+
+          <div class="flex gap-2 mt-3">
             <button id="btn-save-action" class="btn btn-emerald text-xs">💾 Save</button>
             <button id="btn-clear-action" class="btn btn-red text-xs">✕ Clear override</button>
             <button id="btn-cancel-action" class="btn btn-zinc text-xs">Cancel</button>
@@ -200,6 +212,11 @@
         <select id="nf-ref" class="input w-full">
           <option value="">— no ref —</option>
         </select>
+      </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Extra references (multi-select)</label>
+        <div id="nf-extra-refs" class="flex flex-wrap gap-1 border border-zinc-800 rounded p-2 bg-zinc-950 min-h-[40px]"></div>
+        <p class="text-[10px] text-zinc-500 mt-1">Click chip để toggle. Frame phải đã được pick variant — chưa pick sẽ bị skip lúc gen.</p>
       </div>
       <div>
         <label class="text-xs text-zinc-400 block mb-1">Action prompt <span class="text-red-400">*</span></label>
@@ -497,7 +514,43 @@ function isCustomFrame(f) {
 }
 
 function hasOverride(frameId) {
-  return !!(appState.overrides && appState.overrides[frameId] && appState.overrides[frameId].action);
+  const ov = appState.overrides?.[frameId];
+  if (!ov) return false;
+  return !!(ov.action || (Array.isArray(ov.extra_references) && ov.extra_references.length > 0));
+}
+
+// Trả về list extra_references hiệu quả (override > frame def)
+function effectiveExtraRefs(f) {
+  const ov = appState.overrides?.[f.frame_id];
+  if (ov && Array.isArray(ov.extra_references)) return ov.extra_references;
+  return Array.isArray(f.extra_references) ? f.extra_references : [];
+}
+
+// Render multi-select chips — frame nào đã pick mới enable
+function renderRefChips(container, frames, currentFrameId, selectedSet, onChange) {
+  container.innerHTML = '';
+  const candidates = frames.filter(f => f.frame_id !== currentFrameId);
+  if (candidates.length === 0) {
+    container.innerHTML = '<span class="ref-chip-empty">Chưa có frame khác</span>';
+    return;
+  }
+  candidates.forEach(f => {
+    const isPicked = !!appState.state?.picked?.[f.frame_id];
+    const chip = document.createElement('span');
+    const active = selectedSet.has(f.frame_id);
+    chip.className = 'ref-chip' + (active ? ' ref-chip-active' : '') + (!isPicked ? ' ref-chip-disabled' : '');
+    chip.textContent = f.frame_id + (isPicked ? '' : ' ⚠');
+    chip.title = isPicked
+      ? (active ? 'Đã chọn — click để bỏ' : 'Click để thêm')
+      : 'Frame chưa pick variant — sẽ skip lúc gen';
+    chip.onclick = () => {
+      if (selectedSet.has(f.frame_id)) selectedSet.delete(f.frame_id);
+      else selectedSet.add(f.frame_id);
+      renderRefChips(container, frames, currentFrameId, selectedSet, onChange);
+      if (onChange) onChange(selectedSet);
+    };
+    container.appendChild(chip);
+  });
 }
 
 function renderFrameList() {
@@ -528,7 +581,10 @@ function renderFrameList() {
         </div>
       </div>
       <div class="text-xs text-zinc-500 mt-0.5 truncate">${escapeHtml(f.topic || '')}</div>
-      ${f.default_reference ? `<div class="text-[10px] text-zinc-600 mt-0.5">↳ ref: ${escapeHtml(f.default_reference)}</div>` : ''}
+      ${(() => {
+        const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
+        return allRefs.length ? `<div class="text-[10px] text-zinc-600 mt-0.5">↳ ref: ${escapeHtml(allRefs.join(', '))}</div>` : '';
+      })()}
     `;
     li.onclick = (e) => {
       // delete button
@@ -592,8 +648,8 @@ function renderCenter() {
     (isCustomFrame(f) ? ' <span class="badge badge-custom">custom</span>' : '') +
     (isViewMode ? ' <span class="badge badge-pending">view</span>' : '');
   $('cur-topic').textContent = f.topic || '';
-  const refsCount = (f.default_reference ? 1 : 0) + (f.extra_anchor ? 1 : 0);
-  $('cur-refs').textContent = refsCount ? `refs: ${[f.default_reference, f.extra_anchor].filter(Boolean).join(', ')}` : 'no ref';
+  const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
+  $('cur-refs').textContent = allRefs.length ? `refs: ${allRefs.join(', ')}` : 'no ref';
 
   const fullPrompt = `${appState.blocks?.setting || ''}\n\n${appState.blocks?.style || ''}\n\n${effectiveAction}`;
   $('cur-prompt').textContent = fullPrompt;
@@ -768,24 +824,38 @@ function renderViewMode(f) {
   });
 }
 
-// ─── Edit action ───
+// ─── Edit action + refs ───
+const editExtraRefs = new Set();
 $('btn-edit-action').onclick = () => {
   const frameId = viewState.frameId || appState.job?.frameId;
   const f = appState.frames?.find(x => x.frame_id === frameId);
   if (!f) return;
   const ov = appState.overrides?.[frameId];
   $('edit-action-text').value = (ov && ov.action) || f.action || '';
+  // Populate extra refs từ override > frame def
+  editExtraRefs.clear();
+  effectiveExtraRefs(f).forEach(id => editExtraRefs.add(id));
+  // Loại trừ default_reference khỏi candidates (đã có rồi)
+  const candidates = (appState.frames || []).filter(x => x.frame_id !== f.default_reference);
+  renderRefChips($('edit-extra-refs'), candidates, frameId, editExtraRefs);
   $('edit-action-form').style.display = '';
 };
 $('btn-cancel-action').onclick = () => { $('edit-action-form').style.display = 'none'; };
 $('btn-save-action').onclick = async () => {
   const frameId = viewState.frameId || appState.job?.frameId;
   if (!frameId) return;
+  const f = appState.frames?.find(x => x.frame_id === frameId);
   const text = $('edit-action-text').value.trim();
-  const body = { frame_id: frameId, action: text || null };
+  // action: '' nếu unchanged from default thì clear, ngược lại lưu
+  const actionVal = (text && text !== (f?.action || '').trim()) ? text : '';
+  const refsVal = [...editExtraRefs];
+  const body = { frame_id: frameId, action: actionVal, extra_references: refsVal };
   const r = await api('/api/override-prompt', body);
   if (r && !r.error) {
-    toast(text ? 'Đã lưu override' : 'Đã xoá override', 'success');
+    const parts = [];
+    if (actionVal) parts.push('action');
+    if (refsVal.length) parts.push(`${refsVal.length} extra refs`);
+    toast(parts.length ? `Đã lưu override: ${parts.join(' + ')}` : 'Đã xoá override', 'success');
     $('edit-action-form').style.display = 'none';
     fetchState();
   }
@@ -793,8 +863,8 @@ $('btn-save-action').onclick = async () => {
 $('btn-clear-action').onclick = async () => {
   const frameId = viewState.frameId || appState.job?.frameId;
   if (!frameId) return;
-  if (!confirm(`Xoá override cho ${frameId}?`)) return;
-  const r = await api('/api/override-prompt', { frame_id: frameId, action: null });
+  if (!confirm(`Xoá tất cả override (action + extra refs) cho ${frameId}?`)) return;
+  const r = await api('/api/override-prompt', { frame_id: frameId, action: '', extra_references: [] });
   if (r && !r.error) {
     toast('Đã xoá override', 'success');
     $('edit-action-form').style.display = 'none';
@@ -803,6 +873,15 @@ $('btn-clear-action').onclick = async () => {
 };
 
 // ─── Add new frame ───
+const newFrameExtraRefs = new Set();
+const refreshNewFrameExtraRefsChips = () => {
+  const defaultRef = $('nf-ref').value || null;
+  // Loại default_reference khỏi candidates để tránh duplicate
+  const candidates = (appState.frames || []).filter(f => f.frame_id !== defaultRef);
+  // Nếu user vừa đổi defaultRef → bỏ nó khỏi extra set (nếu có)
+  if (defaultRef && newFrameExtraRefs.has(defaultRef)) newFrameExtraRefs.delete(defaultRef);
+  renderRefChips($('nf-extra-refs'), candidates, '__NEW__', newFrameExtraRefs);
+};
 $('btn-add-frame').onclick = () => {
   $('nf-id').value = '';
   $('nf-topic').value = '';
@@ -810,6 +889,7 @@ $('btn-add-frame').onclick = () => {
   $('nf-files').value = '';
   $('nf-files-preview').innerHTML = '';
   newFrameUploadedRefs.length = 0;
+  newFrameExtraRefs.clear();
   // populate ref dropdown
   const sel = $('nf-ref');
   sel.innerHTML = '<option value="">— no ref —</option>';
@@ -819,9 +899,12 @@ $('btn-add-frame').onclick = () => {
     o.textContent = f.frame_id + (f.topic ? ' — ' + f.topic.slice(0, 40) : '');
     sel.appendChild(o);
   });
+  refreshNewFrameExtraRefsChips();
   $('new-frame-modal').style.display = 'flex';
   setTimeout(() => $('nf-id').focus(), 50);
 };
+// Khi đổi default reference → refresh chips để bỏ nó khỏi candidates
+$('nf-ref').addEventListener('change', refreshNewFrameExtraRefsChips);
 
 // Refs uploaded cho frame mới (server paths)
 const newFrameUploadedRefs = [];
@@ -881,9 +964,13 @@ $('btn-submit-add').onclick = async () => {
   if (!action) { toast('Action prompt không được rỗng', 'error'); return; }
   const body = { frame_id, topic, action, default_reference };
   if (newFrameUploadedRefs.length > 0) body.reference_files = [...newFrameUploadedRefs];
+  if (newFrameExtraRefs.size > 0) body.extra_references = [...newFrameExtraRefs];
   const r = await api('/api/add-frame', body);
   if (r && !r.error) {
-    toast(`Đã tạo ${frame_id}${body.reference_files ? ' với ' + body.reference_files.length + ' ref' : ''}`, 'success');
+    const parts = [];
+    if (body.extra_references?.length) parts.push(`${body.extra_references.length} extra ref`);
+    if (body.reference_files?.length) parts.push(`${body.reference_files.length} upload`);
+    toast(`Đã tạo ${frame_id}${parts.length ? ' với ' + parts.join(' + ') : ''}`, 'success');
     $('new-frame-modal').style.display = 'none';
     fetchState();
   }
