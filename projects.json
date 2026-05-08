@@ -1,0 +1,12 @@
+{
+  "_doc": "Registry các project. Mỗi project có 1 folder ./projects/<slug>/ chứa frames.json + output/. Bot khi khởi động sẽ load tất cả project trong list này, mỗi project có riêng worker pool và state.",
+  "projects": [
+    {
+      "slug": "default",
+      "name": "Default Project",
+      "projectId": "ab883b63-982a-4df4-80ca-f9d6da04ec64",
+      "workers": 2,
+      "createdAt": "2026-05-08T08:23:00.000Z"
+    }
+  ]
+}

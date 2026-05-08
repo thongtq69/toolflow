@@ -14,12 +14,12 @@ const CONFIG_PATH = path.resolve(__dirname, './config.json');
 
 // ─── Config layer (UI-driven, ENV override) ───
 const CONFIG_DEFAULTS = {
-  profileDir: './profile',           // user data dir cho Chromium (cookies/login)
-  outputDir: './output',             // nơi lưu ảnh gen + state.json
-  framesPath: './frames.json',       // file storyboard
-  projectId: '',                     // Flow project ID (paste từ wizard)
-  workers: 1,                        // số tab parallel
-  headless: false,                   // false để qua bot detection
+  profileDir: './profile',                          // user data dir cho Chromium (cookies/login)
+  outputDir: './projects/default/output',           // legacy single-project path
+  framesPath: './projects/default/frames.json',     // legacy single-project path
+  projectId: '',                                    // Flow project ID (paste từ wizard)
+  workers: 1,                                       // số tab parallel mỗi project
+  headless: false,                                  // false để qua bot detection
   port: 3737,
   cooldownMin: 20,
   cooldownMax: 50,
