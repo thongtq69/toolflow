@@ -73,7 +73,7 @@ const makeProject = (meta) => {
     name: meta.name || slug,
     projectId,
     projectUrl: projectId ? `https://labs.google/fx/tools/flow/project/${projectId}` : 'https://labs.google/fx/tools/flow',
-    workersTarget: meta.workers || 1,
+    workersTarget: Math.max(1, Math.min(parseInt(meta.workers, 10) || 1, 4)),
     framesPath: path.join(root, 'frames.json'),
     outputDir: path.join(root, 'output'),
     statePath: path.join(root, 'output', 'state.json'),
@@ -88,12 +88,42 @@ const makeProject = (meta) => {
   };
 };
 
+// Bootstrap project folder + frames.json từ template nếu chưa có (máy B clone repo về,
+// .gitignore bỏ frames.json + output/ nên project folders trống).
+const bootstrapProject = (proj) => {
+  const projRoot = path.dirname(proj.framesPath);
+  try { fsSync.mkdirSync(path.join(projRoot, 'output'), { recursive: true }); } catch {}
+  if (fsSync.existsSync(proj.framesPath)) return;
+  console.log(`[bootstrap] ${proj.slug}: tạo frames.json từ template`);
+  const exampleSrc = path.resolve(__dirname, 'frames.example.json');
+  let content;
+  try {
+    const tpl = JSON.parse(fsSync.readFileSync(exampleSrc, 'utf8'));
+    tpl.project = tpl.project || {};
+    tpl.project.flow_project_id = proj.projectId;
+    tpl.project.name = proj.name;
+    content = JSON.stringify(tpl, null, 2);
+  } catch (e) {
+    content = JSON.stringify({
+      project: { name: proj.name, flow_project_id: proj.projectId },
+      blocks: { setting: '', style: '' },
+      frames: [],
+    }, null, 2);
+  }
+  fsSync.writeFileSync(proj.framesPath, content);
+};
+
 const initProjects = () => {
   const reg = loadProjectsRegistry();
-  for (const meta of (reg.projects || [])) projects.set(meta.slug, makeProject(meta));
+  for (const meta of (reg.projects || [])) {
+    const proj = makeProject(meta);
+    projects.set(meta.slug, proj);
+    bootstrapProject(proj);
+  }
   if (projects.size === 0) {
-    // fallback: create default from appConfig
-    projects.set('default', makeProject({ slug: 'default', name: 'Default', projectId: appConfig.projectId, workers: WORKER_COUNT }));
+    const proj = makeProject({ slug: 'default', name: 'Default', projectId: appConfig.projectId, workers: WORKER_COUNT });
+    projects.set('default', proj);
+    bootstrapProject(proj);
   }
 };
 initProjects();
@@ -286,10 +316,15 @@ const initBrowser = async () => {
     args: ['--disable-blink-features=AutomationControlled'],
   });
   let isFirstPage = true;
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   for (const proj of projects.values()) {
     const target = proj.workersTarget || 1;
     if (!proj.projectUrl || proj.projectUrl === 'https://labs.google/fx/tools/flow') {
       console.warn(`[init] project ${proj.slug} chưa có projectId — skip workers`);
+      continue;
+    }
+    if (!UUID_RE.test(proj.projectId)) {
+      console.warn(`[init] project ${proj.slug}: projectId "${proj.projectId}" không phải UUID — skip workers (xoá project qua nút × trên tab UI)`);
       continue;
     }
     for (let i = 0; i < target; i++) {
@@ -989,9 +1024,14 @@ app.get('/api/projects', async (req, res) => {
 app.post('/api/projects', async (req, res) => {
   try {
     const { slug, name, projectId, workers = 1 } = req.body || {};
-    if (!slug || !/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'slug invalid (lowercase alphanumeric + dashes)' });
+    if (!slug || !/^[a-z][a-z0-9-]{1,63}$/.test(slug)) return res.status(400).json({ error: 'slug phải bắt đầu bằng chữ, chỉ chữ thường + số + dấu gạch, 2-64 ký tự' });
     if (projects.has(slug)) return res.status(409).json({ error: `slug "${slug}" đã tồn tại` });
     if (!projectId) return res.status(400).json({ error: 'projectId bắt buộc' });
+    // Flow project ID là UUID v4 — validate để tránh giá trị bogus như "2" hoặc "111"
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_RE.test(projectId)) return res.status(400).json({ error: 'projectId phải là UUID (vd "ab883b63-982a-4df4-80ca-f9d6da04ec64") — paste từ URL Flow project' });
+    const w = parseInt(workers, 10);
+    if (!Number.isFinite(w) || w < 1 || w > 4) return res.status(400).json({ error: 'workers phải là số 1-4' });
 
     const reg = loadProjectsRegistry();
     reg.projects = reg.projects || [];
@@ -1019,6 +1059,35 @@ app.post('/api/projects', async (req, res) => {
 
     console.log(`[projects] + ${slug} (${projectId}) — restart server để launch ${workers} worker(s)`);
     res.json({ ok: true, slug, restartRequired: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete project: remove entry trong projects.json + xoá folder projects/<slug>/
+// (chỉ in-memory state + folder; workers đã launch sẽ idle đến restart).
+// Không cho phép xoá 'default' hoặc project đang chạy job.
+app.delete('/api/projects/:slug', async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    if (slug === 'default') return res.status(400).json({ error: 'Không xoá được project "default"' });
+    const proj = projects.get(slug);
+    if (!proj) return res.status(404).json({ error: `Project "${slug}" không tồn tại` });
+    if (proj.jobs.size > 0 || proj.queue.length > 0) {
+      return res.status(409).json({ error: `Project "${slug}" đang có ${proj.jobs.size} job + ${proj.queue.length} queue, stop trước rồi xoá` });
+    }
+    // Xoá entry registry
+    const reg = loadProjectsRegistry();
+    reg.projects = (reg.projects || []).filter(p => p.slug !== slug);
+    saveProjectsRegistry(reg);
+    // Remove from in-memory
+    projects.delete(slug);
+    // Xoá folder (best-effort, có thể fail nếu folder readonly)
+    const projRoot = path.dirname(proj.framesPath);
+    try { await fs.rm(projRoot, { recursive: true, force: true }); }
+    catch (e) { console.warn(`[projects] - ${slug}: xoá folder fail: ${e.message}`); }
+    console.log(`[projects] - ${slug} đã xoá. Workers cũ (nếu có) idle đến restart.`);
+    res.json({ ok: true, slug, restartRequired: proj.pagePool.length > 0 });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

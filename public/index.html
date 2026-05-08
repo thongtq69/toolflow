@@ -94,6 +94,8 @@
   .proj-tab:hover { background: #18181b; color: #d4d4d8; }
   .proj-tab.proj-tab-active { background: #1e3a8a; border-color: #60a5fa; color: #dbeafe; }
   .proj-tab .proj-tab-meta { font-size: 10px; opacity: 0.7; margin-left: 4px; }
+  .proj-tab .proj-tab-x { margin-left: 6px; padding: 0 4px; border-radius: 3px; color: #71717a; font-weight: bold; font-size: 13px; }
+  .proj-tab .proj-tab-x:hover { background: #7f1d1d; color: #fecaca; }
   .proj-tab-add { padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #52525b; border: 1px dashed #3f3f46; }
   .proj-tab-add:hover { color: #a1a1aa; border-color: #71717a; }
 </style>
@@ -480,19 +482,51 @@ function renderProjectTabs() {
   projectsList.forEach(p => {
     const tab = document.createElement('div');
     tab.className = 'proj-tab' + (p.slug === currentSlug ? ' proj-tab-active' : '');
-    tab.textContent = p.name || p.slug;
-    if (p.workers) tab.innerHTML += `<span class="proj-tab-meta">${p.workers}w</span>`;
+    const label = document.createElement('span');
+    label.textContent = p.name || p.slug;
+    tab.appendChild(label);
+    if (p.workers) {
+      const meta = document.createElement('span');
+      meta.className = 'proj-tab-meta';
+      meta.textContent = `${p.workers}w`;
+      tab.appendChild(meta);
+    }
     tab.title = `${p.slug} · ${p.projectId || 'no project ID'}`;
     tab.onclick = () => switchProject(p.slug);
+    // X button (chỉ project ngoài default)
+    if (p.slug !== 'default') {
+      const x = document.createElement('span');
+      x.className = 'proj-tab-x';
+      x.textContent = '×';
+      x.title = 'Xoá project';
+      x.onclick = (e) => { e.stopPropagation(); deleteProject(p.slug, p.name); };
+      tab.appendChild(x);
+    }
     wrap.appendChild(tab);
   });
-  // + Add project (basic — opens prompt to create new project entry)
+  // + Add project
   const add = document.createElement('div');
   add.className = 'proj-tab-add';
   add.textContent = '+';
   add.title = 'Thêm project mới (paste projectId)';
   add.onclick = openNewProjectPrompt;
   wrap.appendChild(add);
+}
+async function deleteProject(slug, name) {
+  if (!confirm(`Xoá project "${name || slug}"?\n\nFolder projects/${slug}/ + tất cả frames/output/state sẽ bị xoá vĩnh viễn.`)) return;
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(slug)}`, { method: 'DELETE' }).then(r => r.json());
+    if (r.error) { toast(r.error, 'error'); return; }
+    toast(`Đã xoá ${slug}`, 'success');
+    if (currentSlug === slug) {
+      currentSlug = 'default';
+      localStorage.setItem('vf:currentSlug', 'default');
+    }
+    await fetchProjects();
+    await fetchState();
+  } catch (e) {
+    toast('Lỗi: ' + e.message, 'error');
+  }
 }
 async function switchProject(slug) {
   if (slug === currentSlug) return;
