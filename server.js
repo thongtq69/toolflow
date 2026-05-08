@@ -759,7 +759,9 @@ const findPromptTextbox = async (page) => {
 };
 
 // Single attempt — không retry. Throw nếu Google flag hoặc lỗi UI.
-const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null }) => {
+// burstCount: số lần click submit liên tiếp (mỗi click = 4 ảnh) → tổng = 4×burstCount ảnh.
+// Flow accept re-click submit ngay khi đang gen → bot dồn request, không phải đợi tuần tự.
+const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, burstCount = 1 }) => {
   const page = worker.page;
   const wid = worker.id;
   // ─── Anti-detection: cooldown giữa 2 lần gen (GLOBAL cho mọi worker và project — share rate limit per IP/account)
@@ -858,7 +860,34 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null }
   }
 
   await createBtn.click({ timeout: 10000 });
-  console.log(`    [click] submitted at ${new Date().toISOString()}`);
+  console.log(`    [click 1/${burstCount}] submitted at ${new Date().toISOString()}`);
+
+  // Burst: click createBtn thêm (burstCount-1) lần liên tiếp, gap 2-4s giữa các click.
+  // Flow giữ prompt trong textbox sau submit → click lại sẽ gen 4 ảnh nữa với same params.
+  // Nếu textbox bị clear sau click, re-insert prompt trước khi click.
+  for (let i = 2; i <= burstCount; i++) {
+    await sleep(rand(2500, 4000));
+    try {
+      const tb = await findPromptTextbox(page);
+      const cur = await tb.textContent().catch(() => '');
+      if (!cur.includes(prompt.slice(0, 20))) {
+        console.log(`    [burst ${i}/${burstCount}] textbox cleared sau submit trước → re-insert prompt`);
+        await tb.click({ timeout: 5000 });
+        await humanPause(200, 500);
+        await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a').catch(() => {});
+        await sleep(rand(150, 350));
+        await page.keyboard.press('Delete').catch(() => {});
+        await sleep(rand(300, 700));
+        await page.keyboard.insertText(prompt);
+        await humanPause(500, 1000);
+      }
+      const btn = await findCreateButton(page);
+      await btn.click({ timeout: 10000 });
+      console.log(`    [click ${i}/${burstCount}] submitted at ${new Date().toISOString()}`);
+    } catch (e) {
+      console.warn(`    [burst ${i}/${burstCount}] click fail (${e.message.split('\n')[0]}) — bỏ qua, tiếp tục đợi capture`);
+    }
+  }
 
   let media;
   try {
@@ -894,11 +923,11 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null }
 };
 
 // Wrapper: gọi genFrameOnce, nếu Google flag → wait random 60-180s → retry, max N lần
-const genFrame = async ({ worker, prompt, referenceFiles = [], maxRetries = 3, proj = null }) => {
+const genFrame = async ({ worker, prompt, referenceFiles = [], maxRetries = 3, proj = null, burstCount = 1 }) => {
   let lastErr;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const result = await genFrameOnce({ worker, prompt, referenceFiles, proj });
+      const result = await genFrameOnce({ worker, prompt, referenceFiles, proj, burstCount });
       if (attempt > 1) console.log(`  [${worker.id}] ✓ Retry attempt ${attempt} thành công`);
       return { variants: result, attempts: attempt };
     } catch (e) {
@@ -939,7 +968,7 @@ const downloadImage = async (url, filepath, browserCtx = null) => {
 // ────────────────────────────────────────────────────────────
 // JOB RUNNER (multi-worker, supports serial HITL + batch parallel)
 // ────────────────────────────────────────────────────────────
-const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
+const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial', burstCount = 1) => {
   const f = cfg.frames[frameIdx];
 
   const overrides = await loadOverrides(proj);
@@ -1006,15 +1035,16 @@ const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
     lastVariants: null,
     startedAt: new Date().toISOString(),
     mode,
+    burstCount,
   };
   proj.jobs.set(f.frame_id, j);
   broadcastJob(proj);
 
-  console.log(`\n[job ${proj.slug}/${worker.id}] ▶ ${f.frame_id} (${frameIdx + 1}/${cfg.frames.length}) — ${f.topic}  mode=${mode}`);
+  console.log(`\n[job ${proj.slug}/${worker.id}] ▶ ${f.frame_id} (${frameIdx + 1}/${cfg.frames.length}) — ${f.topic}  mode=${mode}  burst=${burstCount}x (${burstCount * 4} ảnh)`);
   console.log(`[job ${proj.slug}/${worker.id}]   refs=${refs.length} ${refs.map(r => path.basename(path.dirname(r)) + '/' + path.basename(r)).join(', ')}  prompt-len=${fullPrompt.length}`);
 
   try {
-    const { variants, attempts } = await genFrame({ worker, prompt: fullPrompt, referenceFiles: refs, maxRetries: 3, proj });
+    const { variants, attempts } = await genFrame({ worker, prompt: fullPrompt, referenceFiles: refs, maxRetries: 3, proj, burstCount });
     if (proj.jobAbort) {
       j.status = 'failed';
       j.lastError = 'aborted';
@@ -1077,7 +1107,7 @@ const runDispatcher = async (proj) => {
       // Chạy frame async, không block dispatcher khi batch mode parallel
       const runP = (async () => {
         try {
-          await runOneFrame(proj, cfg, item.frameIdx, worker, item.mode);
+          await runOneFrame(proj, cfg, item.frameIdx, worker, item.mode, item.burstCount || 1);
         } catch (e) {
           console.error(`[dispatcher ${proj.slug}] runOneFrame ${item.frame_id} threw:`, e.message);
         } finally {
@@ -1100,7 +1130,7 @@ const runDispatcher = async (proj) => {
 };
 
 // Sau khi anh pick (serial mode), advance to next frame
-const advanceJob = async (proj, lastFrameIdx, mode = 'serial') => {
+const advanceJob = async (proj, lastFrameIdx, mode = 'serial', burstCount = 1) => {
   if (proj.jobAbort || mode === 'batch') return;
   const cfg = await loadFrames(proj);
   const nextIdx = lastFrameIdx + 1;
@@ -1108,7 +1138,7 @@ const advanceJob = async (proj, lastFrameIdx, mode = 'serial') => {
     console.log(`[job ${proj.slug}] ✓ all frames done`);
     return;
   }
-  proj.queue.push({ frameIdx: nextIdx, frame_id: cfg.frames[nextIdx].frame_id, mode });
+  proj.queue.push({ frameIdx: nextIdx, frame_id: cfg.frames[nextIdx].frame_id, mode, burstCount });
   runDispatcher(proj);
 };
 
@@ -1676,13 +1706,14 @@ const handleStart = async (proj, req, res) => {
   const cfg = await loadFrames(proj);
   const primary = computePrimaryJob(proj);
   const fromIdx = req.body?.from_idx ?? (primary.frameIdx >= 0 ? primary.frameIdx + 1 : 0);
+  const burstCount = Math.max(1, Math.min(4, parseInt(req.body?.burst_count, 10) || 1));
   if (fromIdx < 0 || fromIdx >= cfg.frames.length) return res.status(400).json({ error: 'from_idx out of range' });
   if (fromIdx === 0 && req.body?.reset_state !== false) {
     await saveState(proj, { picked: {}, startedAt: new Date().toISOString() });
     proj.jobs.clear();
     console.log(`[job ${proj.slug}] ⌫ reset state vì start từ frame 0`);
   }
-  console.log(`[job ${proj.slug}] ▶▶ start from frame index ${fromIdx} (${cfg.frames[fromIdx].frame_id})`);
+  console.log(`[job ${proj.slug}] ▶▶ start from frame index ${fromIdx} (${cfg.frames[fromIdx].frame_id}) burst=${burstCount}x`);
   // Dedupe: skip nếu frame đã trong queue hoặc đang running/waiting_pick (user spam Resume)
   const targetFid = cfg.frames[fromIdx].frame_id;
   const inQueue = proj.queue.some(q => q.frame_id === targetFid);
@@ -1693,7 +1724,7 @@ const handleStart = async (proj, req, res) => {
     return;
   }
   // Serial mode: enqueue 1 frame, dispatcher sẽ pause sau xong (HITL pick → advance)
-  proj.queue.push({ frameIdx: fromIdx, frame_id: targetFid, mode: 'serial' });
+  proj.queue.push({ frameIdx: fromIdx, frame_id: targetFid, mode: 'serial', burstCount });
   res.json({ ok: true, fromIdx, mode: 'serial', slug: proj.slug });
   runDispatcher(proj).catch(e => console.error(`[dispatcher ${proj.slug}] crash:`, e.message));
 };
@@ -1704,8 +1735,9 @@ app.post('/api/p/:slug/start', wrapProjectHandler(handleStart));
 const handleBatchStart = async (proj, req, res) => {
   proj.jobAbort = false;
   const cfg = await loadFrames(proj);
-  const { frame_ids } = req.body || {};
+  const { frame_ids, burst_count } = req.body || {};
   if (!Array.isArray(frame_ids) || frame_ids.length === 0) return res.status(400).json({ error: 'frame_ids[] bắt buộc' });
+  const burstCount = Math.max(1, Math.min(4, parseInt(burst_count, 10) || 1));
   const items = [];
   const skipped = [];
   for (const fid of frame_ids) {
@@ -1719,7 +1751,7 @@ const handleBatchStart = async (proj, req, res) => {
       skipped.push(fid);
       continue;
     }
-    items.push({ frameIdx: idx, frame_id: fid, mode: 'batch' });
+    items.push({ frameIdx: idx, frame_id: fid, mode: 'batch', burstCount });
   }
   for (const it of items) proj.queue.push(it);
   console.log(`[batch ${proj.slug}] ▶▶ enqueued ${items.length} frames, ${proj.pagePool.length} workers parallel` + (skipped.length ? ` — skipped ${skipped.length} dupe (${skipped.join(',')})` : ''));
@@ -1750,7 +1782,7 @@ const handlePick = async (proj, req, res) => {
   console.log(`[job ${proj.slug}] ✓ ${frame_id} picked v${variant_idx + 1}`);
   res.json({ ok: true });
   if (j.mode === 'serial') {
-    (async () => { try { await advanceJob(proj, j.frameIdx, 'serial'); } catch (e) { console.error(e.message); } })();
+    (async () => { try { await advanceJob(proj, j.frameIdx, 'serial', j.burstCount || 1); } catch (e) { console.error(e.message); } })();
   }
 };
 app.post('/api/pick', wrapProjectHandler(handlePick));
@@ -1768,7 +1800,7 @@ const handleSkip = async (proj, req, res) => {
   broadcastJob(proj);
   res.json({ ok: true });
   if (j.mode === 'serial') {
-    (async () => { try { await advanceJob(proj, j.frameIdx, 'serial'); } catch (e) { console.error(e.message); } })();
+    (async () => { try { await advanceJob(proj, j.frameIdx, 'serial', j.burstCount || 1); } catch (e) { console.error(e.message); } })();
   }
 };
 app.post('/api/skip', wrapProjectHandler(handleSkip));
@@ -1776,18 +1808,20 @@ app.post('/api/p/:slug/skip', wrapProjectHandler(handleSkip));
 
 // ─── Retry ───
 const handleRetry = async (proj, req, res) => {
-  const { frame_id } = req.body || {};
+  const { frame_id, burst_count } = req.body || {};
   const target = frame_id || computePrimaryJob(proj).frameId;
   const j = proj.jobs.get(target);
   if (!j) return res.status(404).json({ error: `no active job for ${target}` });
   if (!['failed', 'waiting_pick'].includes(j.status)) return res.status(409).json({ error: `cannot retry in ${j.status}` });
   const idx = j.frameIdx;
   const mode = j.mode;
+  // Burst: ưu tiên body.burst_count (UI hiện tại), fallback giữ burstCount cũ của job
+  const burstCount = Math.max(1, Math.min(4, parseInt(burst_count, 10) || j.burstCount || 1));
   proj.jobs.delete(target);
-  console.log(`[job ${proj.slug}] ↻ retry ${target}`);
+  console.log(`[job ${proj.slug}] ↻ retry ${target} burst=${burstCount}x`);
   res.json({ ok: true });
   // Re-enqueue
-  proj.queue.push({ frameIdx: idx, frame_id: target, mode });
+  proj.queue.push({ frameIdx: idx, frame_id: target, mode, burstCount });
   runDispatcher(proj).catch(e => console.error(e.message));
 };
 app.post('/api/retry', wrapProjectHandler(handleRetry));

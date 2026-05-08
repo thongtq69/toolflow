@@ -171,6 +171,13 @@
       <div id="edit-action-wrap" class="mb-3" style="display:none;">
         <div class="flex items-center gap-2 mb-2 flex-wrap">
           <button id="btn-gen-this-frame" class="btn btn-emerald text-xs" title="Gen riêng frame này (không serial — chạy independent worker)">▶ Gen frame này</button>
+          <div class="inline-flex items-center gap-0.5 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5" title="Số lượt gen liên tiếp (mỗi lượt = 4 ảnh). x2 → 8 ảnh, x4 → 16 ảnh.">
+            <span class="text-[10px] text-zinc-500 mr-1">burst:</span>
+            <button data-burst="1" class="burst-pick btn-burst px-1.5 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white">x1</button>
+            <button data-burst="2" class="burst-pick btn-burst px-1.5 py-0.5 rounded text-[11px] font-semibold text-zinc-400 hover:bg-zinc-800">x2</button>
+            <button data-burst="3" class="burst-pick btn-burst px-1.5 py-0.5 rounded text-[11px] font-semibold text-zinc-400 hover:bg-zinc-800">x3</button>
+            <button data-burst="4" class="burst-pick btn-burst px-1.5 py-0.5 rounded text-[11px] font-semibold text-zinc-400 hover:bg-zinc-800">x4</button>
+          </div>
           <button id="btn-edit-action" class="btn btn-zinc text-xs">✏ Edit action + refs</button>
           <span id="edit-action-status" class="text-[11px] text-zinc-500"></span>
         </div>
@@ -1171,6 +1178,9 @@ function renderCenter() {
   }
   // Cache-bust theo gen-timestamp (chỉ đổi khi gen mới), không phải Date.now() — giảm tải re-download
   const cacheKey = encodeURIComponent(j.startedAt || j.frameId || '');
+  // Grid responsive: 2 cols cho ≤4 variants, 4 cols cho >4 (burst x2-x4)
+  grid.classList.remove('grid-cols-2', 'grid-cols-3', 'grid-cols-4');
+  grid.classList.add(variants.length > 4 ? 'grid-cols-4' : 'grid-cols-2');
   variants.forEach((v, idx) => {
     const card = document.createElement('div');
     card.className = 'variant-card bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800';
@@ -1305,6 +1315,23 @@ function renderViewMode(f) {
   });
 }
 
+// ─── Burst count picker (số lượt gen liên tiếp, mỗi lượt = 4 ảnh) ───
+let burstCount = parseInt(localStorage.getItem('vf:burstCount') || '1', 10);
+function setBurstCount(n) {
+  burstCount = Math.max(1, Math.min(4, n));
+  localStorage.setItem('vf:burstCount', String(burstCount));
+  document.querySelectorAll('.burst-pick').forEach(b => {
+    const v = parseInt(b.dataset.burst, 10);
+    b.classList.toggle('bg-emerald-600', v === burstCount);
+    b.classList.toggle('text-white', v === burstCount);
+    b.classList.toggle('text-zinc-400', v !== burstCount);
+  });
+}
+document.querySelectorAll('.burst-pick').forEach(b => {
+  b.onclick = () => setBurstCount(parseInt(b.dataset.burst, 10));
+});
+setBurstCount(burstCount);
+
 // ─── Gen riêng 1 frame (batch mode 1 item) ───
 $('btn-gen-this-frame').onclick = async () => {
   const frameId = viewState.frameId || appState.job?.frameId;
@@ -1326,9 +1353,9 @@ $('btn-gen-this-frame').onclick = async () => {
     );
     if (!ok) return;
   }
-  const r = await api('/api/batch-start', { frame_ids: [frameId] });
+  const r = await api('/api/batch-start', { frame_ids: [frameId], burst_count: burstCount });
   if (r && !r.error) {
-    toast(`▶ Bắt đầu gen ${frameId}`, 'success');
+    toast(`▶ Bắt đầu gen ${frameId} × ${burstCount} lượt (${burstCount * 4} ảnh)`, 'success');
   }
 };
 
@@ -1708,8 +1735,8 @@ async function api(path, body) {
   }
 }
 
-$('btn-start').onclick = () => api('/api/start');
-$('btn-retry').onclick = () => api('/api/retry');
+$('btn-start').onclick = () => api('/api/start', { burst_count: burstCount });
+$('btn-retry').onclick = () => api('/api/retry', { burst_count: burstCount });
 $('btn-skip').onclick = () => api('/api/skip');
 $('btn-stop').onclick = () => api('/api/stop');
 $('btn-batch').onclick = async () => {
@@ -1717,11 +1744,11 @@ $('btn-batch').onclick = async () => {
   // Lọc frame chưa picked + chưa custom-only-action
   const candidates = frames.filter(f => !f.picked).map(f => f.frame_id);
   if (candidates.length === 0) { toast('Không có frame nào chưa pick', 'error'); return; }
-  const input = prompt(`Batch parallel ${appState.workers?.length || 1} workers.\nNhập frame_ids cách nhau dấu phẩy (mặc định: tất cả unfilled):\n\nUnfilled: ${candidates.join(', ')}`, candidates.join(','));
+  const input = prompt(`Batch parallel ${appState.workers?.length || 1} workers, burst x${burstCount} (${burstCount * 4} ảnh/frame).\nNhập frame_ids cách nhau dấu phẩy (mặc định: tất cả unfilled):\n\nUnfilled: ${candidates.join(', ')}`, candidates.join(','));
   if (!input) return;
   const frame_ids = input.split(',').map(s => s.trim()).filter(Boolean);
-  const r = await api('/api/batch-start', { frame_ids });
-  if (r && !r.error) toast(`Batch ${frame_ids.length} frames trên ${r.workers} workers`, 'success');
+  const r = await api('/api/batch-start', { frame_ids, burst_count: burstCount });
+  if (r && !r.error) toast(`Batch ${frame_ids.length} frames × x${burstCount} (${frame_ids.length * burstCount * 4} ảnh)`, 'success');
 };
 $('btn-reset').onclick = async () => {
   if (!confirm('Reset state.json + job state? Các frame đã picked sẽ mất tham chiếu.')) return;
