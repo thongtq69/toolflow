@@ -178,7 +178,23 @@ const acquireWorker = async (proj) => {
   if (!proj) proj = defaultProject();
   while (true) {
     const w = proj.pagePool.find(w => !w.busy);
-    if (w) { w.busy = true; return w; }
+    if (w) {
+      // Recover: nếu page bị user đóng tay → tạo page mới + nav về project URL
+      if (w.page?.isClosed?.()) {
+        try {
+          const projCtx = proj.ctx || ctx;
+          console.warn(`[acquireWorker ${proj.slug}] ${w.id} page closed → recreate`);
+          w.page = await projCtx.newPage();
+          await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          w.settingsVerified = false;
+        } catch (e) {
+          console.error(`[acquireWorker ${proj.slug}] ${w.id} recreate fail: ${e.message}`);
+          // Vẫn return để tránh deadlock; gen sẽ fail nhưng có error rõ
+        }
+      }
+      w.busy = true;
+      return w;
+    }
     await sleep(500);
   }
 };
@@ -1640,7 +1656,7 @@ app.put('/api/config', async (req, res) => {
 
     let restartRequired = false;
     let reNavigated = false;
-    // Apply project change immediately — also sync default project state
+    // Apply project change immediately — sync default project state + projects.json registry
     if (updates.projectId && updates.projectId !== PROJECT_ID) {
       PROJECT_ID = updates.projectId;
       PROJECT_URL = `https://labs.google/fx/tools/flow/project/${PROJECT_ID}`;
@@ -1649,7 +1665,17 @@ app.put('/api/config', async (req, res) => {
         dp.projectId = PROJECT_ID;
         dp.projectUrl = PROJECT_URL;
       }
-      // Re-nav chỉ workers của default project (config endpoint chỉ sửa default)
+      // Persist vào projects.json registry để survive restart
+      try {
+        const reg = loadProjectsRegistry();
+        const entry = (reg.projects || []).find(p => p.slug === 'default');
+        if (entry) {
+          entry.projectId = PROJECT_ID;
+          saveProjectsRegistry(reg);
+          console.log(`[config] synced default projectId → projects.json`);
+        }
+      } catch (e) { console.error(`[config] sync registry fail: ${e.message}`); }
+      // Re-nav chỉ workers của default project
       for (const w of (dp?.pagePool || [])) {
         try {
           await w.page.goto(PROJECT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
