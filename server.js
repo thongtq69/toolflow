@@ -862,24 +862,47 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
   await createBtn.click({ timeout: 10000 });
   console.log(`    [click 1/${burstCount}] submitted at ${new Date().toISOString()}`);
 
-  // Burst: re-type prompt + click submit thêm (burstCount-1) lần với gap 3-4s.
-  // Đã verify (test 5/8/2026): mỗi lần re-submit trigger đúng 4 batchGenerateImages
-  // requests parallel → tổng = 4×burstCount ảnh. Cách này stable hơn click button
-  // thumbnail (undo/redo/refresh inconsistent giữa loading vs completed states).
+  // Burst rounds 2+: click button "Sử dụng lại câu lệnh" trên thumbnail (undo/redo
+  // icon) → Flow restore CẢ prompt + reference image (chip) vào prompt bar. Sau đó
+  // click Create để gen 4 ảnh nữa CÓ ref image. Cách này preserve được ref qua các
+  // round (nếu chỉ re-type prompt thì round 2+ sẽ thiếu ref → ảnh sai style).
+  // Fallback: nếu button không có (ref-less gen), dùng re-type prompt như cũ.
   for (let i = 2; i <= burstCount; i++) {
-    await sleep(rand(2800, 3800));
+    await sleep(rand(2500, 3500));
     try {
-      const tb = await findPromptTextbox(page);
-      await tb.click({ timeout: 5000 });
-      await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a').catch(() => {});
-      await sleep(rand(100, 250));
-      await page.keyboard.press('Delete').catch(() => {});
-      await sleep(rand(200, 400));
-      await page.keyboard.insertText(prompt);
-      await sleep(rand(400, 800));
-      const btn = await findCreateButton(page);
-      await btn.click({ timeout: 8000 });
-      console.log(`    [click ${i}/${burstCount}] submitted at ${new Date().toISOString()}`);
+      const restored = await page.evaluate(() => {
+        const buttons = [...document.querySelectorAll('button')]
+          .filter(b => {
+            const r = b.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return false;
+            const t = (b.textContent || '');
+            return /s[ưử]\s*d[uụ]ng\s*l[aạ]i\s*c[aâ]u\s*l[eệ]nh/i.test(t) && !b.disabled;
+          });
+        if (buttons.length === 0) return { ok: false };
+        buttons[0].click();
+        return { ok: true, count: buttons.length };
+      });
+
+      if (restored.ok) {
+        // Đợi prompt + ref được fill vào textbox + ref chip render xong
+        await sleep(rand(700, 1100));
+        const btn = await findCreateButton(page);
+        await btn.click({ timeout: 8000 });
+        console.log(`    [click ${i}/${burstCount}] via "Sử dụng lại câu lệnh" → submitted (${restored.count} buttons available)`);
+      } else {
+        // Fallback: prompt bar empty (no ref + no history) → re-type prompt
+        const tb = await findPromptTextbox(page);
+        await tb.click({ timeout: 5000 });
+        await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a').catch(() => {});
+        await sleep(rand(100, 250));
+        await page.keyboard.press('Delete').catch(() => {});
+        await sleep(rand(200, 400));
+        await page.keyboard.insertText(prompt);
+        await sleep(rand(400, 800));
+        const btn = await findCreateButton(page);
+        await btn.click({ timeout: 8000 });
+        console.log(`    [click ${i}/${burstCount}] fallback re-type → submitted (no reuse button found)`);
+      }
     } catch (e) {
       console.warn(`    [burst ${i}/${burstCount}] re-submit fail: ${e.message.split('\n')[0]} — dừng burst (vẫn nhận response từ ${i - 1} lượt trước)`);
       break;
