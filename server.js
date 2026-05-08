@@ -84,6 +84,7 @@ const makeProject = (meta) => {
     jobAbort: false,
     dispatching: false,
     logBuffer: [],
+    pagePool: [], // [{ page, busy, id, settingsVerified, projectSlug }] — workers dedicated cho project này
   };
 };
 
@@ -105,24 +106,44 @@ const getProject = (slug) => {
 const defaultProject = () => projects.get('default') || projects.values().next().value;
 
 let ctx;
-const pagePool = []; // [{ page, busy, id, settingsVerified, currentProjectSlug }]
-const acquireWorker = async (proj) => {
-  // wait for free worker; navigate to proj.projectUrl if worker last used a different project
-  while (true) {
-    const w = pagePool.find(w => !w.busy);
-    if (w) {
-      w.busy = true;
-      if (proj && w.currentProjectSlug !== proj.slug) {
-        try {
-          await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        } catch (e) {
-          console.warn(`[acquireWorker] ${w.id} re-nav to ${proj.slug} failed: ${e.message}`);
-        }
-        w.currentProjectSlug = proj.slug;
-        w.settingsVerified = false; // re-verify settings on new project
-      }
-      return w;
+// Mỗi project có proj.pagePool dedicated. allWorkers() aggregate cho UI/legacy.
+const allWorkers = () => {
+  const out = [];
+  for (const p of projects.values()) out.push(...p.pagePool);
+  return out;
+};
+// Legacy alias: aggregate view + push routes vào default project. Cho code legacy
+// (debugShot, ensureLivePage, /api/setup/launch-browser, /api/config re-nav).
+const pagePool = new Proxy([], {
+  get(_t, k) {
+    const arr = allWorkers();
+    if (k === 'length') return arr.length;
+    if (k === 'push') return (...items) => {
+      const dp = defaultProject();
+      if (dp) for (const it of items) dp.pagePool.push(it);
+      return allWorkers().length;
+    };
+    if (typeof k === 'symbol' || k === 'find' || k === 'map' || k === 'filter' || k === 'forEach' || k === 'some' || k === 'every' || k === 'slice' || k === 'indexOf') {
+      const v = arr[k];
+      return typeof v === 'function' ? v.bind(arr) : v;
     }
+    if (typeof k === 'string' && /^\d+$/.test(k)) return arr[+k];
+    return arr[k];
+  },
+  set(_t, k, v) {
+    if (k === 'length' && Number(v) === 0) {
+      // Legacy clear: clear all per-project pools (used khi relaunch ctx)
+      for (const p of projects.values()) p.pagePool.length = 0;
+      return true;
+    }
+    return true; // swallow other writes silently
+  },
+});
+const acquireWorker = async (proj) => {
+  if (!proj) proj = defaultProject();
+  while (true) {
+    const w = proj.pagePool.find(w => !w.busy);
+    if (w) { w.busy = true; return w; }
     await sleep(500);
   }
 };
@@ -257,29 +278,41 @@ const debugShot = async (label, page = null) => {
 
 const initBrowser = async () => {
   const absProfile = path.resolve(USER_DATA_DIR);
-  const dp = defaultProject();
-  const initialUrl = dp.projectUrl || PROJECT_URL;
-  console.log(`[init] launching browser (workers=${WORKER_COUNT}), profile=`, absProfile);
+  const totalWorkers = [...projects.values()].reduce((s, p) => s + (p.workersTarget || 0), 0);
+  console.log(`[init] launching browser, profile=`, absProfile, ` projects=${projects.size}  total_workers=${totalWorkers}`);
   ctx = await chromium.launchPersistentContext(absProfile, {
     headless: HEADLESS,
     viewport: { width: 1280, height: 900 },
     args: ['--disable-blink-features=AutomationControlled'],
   });
-  for (let i = 0; i < WORKER_COUNT; i++) {
-    let p;
-    if (i === 0) p = ctx.pages()[0] || await ctx.newPage();
-    else p = await ctx.newPage();
-    console.log(`[init W${i + 1}] navigate to project URL (${dp.slug})`);
-    await p.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await p.waitForTimeout(4000);
-    const url = p.url();
-    if (url.includes('accounts.google.com') || url.includes('signin')) {
-      console.error(`[init W${i + 1}] ❌ Browser bị redirect về login. Cookie expired?`);
+  let isFirstPage = true;
+  for (const proj of projects.values()) {
+    const target = proj.workersTarget || 1;
+    if (!proj.projectUrl || proj.projectUrl === 'https://labs.google/fx/tools/flow') {
+      console.warn(`[init] project ${proj.slug} chưa có projectId — skip workers`);
+      continue;
     }
-    pagePool.push({ page: p, busy: false, id: `W${i + 1}`, settingsVerified: false, currentProjectSlug: dp.slug });
-    console.log(`[init W${i + 1}] ✓ ready at ${url}`);
+    for (let i = 0; i < target; i++) {
+      let p;
+      if (isFirstPage) { p = ctx.pages()[0] || await ctx.newPage(); isFirstPage = false; }
+      else p = await ctx.newPage();
+      const wid = `${proj.slug}-W${i + 1}`;
+      console.log(`[init ${wid}] navigate to ${proj.projectUrl}`);
+      try {
+        await p.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await p.waitForTimeout(4000);
+        const url = p.url();
+        if (url.includes('accounts.google.com') || url.includes('signin')) {
+          console.error(`[init ${wid}] ❌ Browser bị redirect về login. Cookie expired?`);
+        }
+        proj.pagePool.push({ page: p, busy: false, id: wid, settingsVerified: false, projectSlug: proj.slug });
+        console.log(`[init ${wid}] ✓ ready at ${url}`);
+      } catch (e) {
+        console.error(`[init ${wid}] ❌ failed: ${e.message}`);
+      }
+    }
   }
-  console.log(`[init] ✓ ${pagePool.length} worker(s) ready`);
+  console.log(`[init] ✓ ${allWorkers().length} worker(s) ready across ${projects.size} project(s)`);
 };
 
 // x4 trigger 4 request batchGenerateImages liên tiếp. Track 2 counter:
@@ -983,8 +1016,8 @@ const handleState = async (proj, req, res) => {
     jobs: jobsList,                 // multi-job array
     jobs_by_frame: jobsByFrame,
     queue_size: proj.queue.length,
-    workers: pagePool.map(w => ({ id: w.id, busy: w.busy, settingsVerified: w.settingsVerified, currentProjectSlug: w.currentProjectSlug })),
-    worker_count: pagePool.length,
+    workers: proj.pagePool.map(w => ({ id: w.id, busy: w.busy, settingsVerified: w.settingsVerified, projectSlug: w.projectSlug })),
+    worker_count: proj.pagePool.length,
     overrides,
     custom_frames: customFrames
   });
@@ -1176,8 +1209,8 @@ const handleBatchStart = async (proj, req, res) => {
     items.push({ frameIdx: idx, frame_id: fid, mode: 'batch' });
   }
   for (const it of items) proj.queue.push(it);
-  console.log(`[batch ${proj.slug}] ▶▶ enqueued ${items.length} frames, ${pagePool.length} workers parallel`);
-  res.json({ ok: true, count: items.length, workers: pagePool.length, slug: proj.slug });
+  console.log(`[batch ${proj.slug}] ▶▶ enqueued ${items.length} frames, ${proj.pagePool.length} workers parallel`);
+  res.json({ ok: true, count: items.length, workers: proj.pagePool.length, slug: proj.slug });
   runDispatcher(proj).catch(e => console.error(`[dispatcher ${proj.slug}] crash:`, e.message));
 };
 app.post('/api/batch-start', wrapProjectHandler(handleBatchStart));
@@ -1344,11 +1377,11 @@ app.put('/api/config', async (req, res) => {
         dp.projectId = PROJECT_ID;
         dp.projectUrl = PROJECT_URL;
       }
-      for (const w of pagePool) {
+      // Re-nav chỉ workers của default project (config endpoint chỉ sửa default)
+      for (const w of (dp?.pagePool || [])) {
         try {
           await w.page.goto(PROJECT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
           w.settingsVerified = false;
-          if (dp) w.currentProjectSlug = dp.slug;
         } catch (e) { console.error(`[config] re-nav ${w.id} failed:`, e.message); }
       }
       reNavigated = true;
