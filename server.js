@@ -1030,6 +1030,14 @@ const runDispatcher = async (proj) => {
       const item = proj.queue.shift();
       const f = cfg.frames[item.frameIdx];
       if (!f || f.frame_id !== item.frame_id) continue; // stale
+      // Safety: skip nếu frame đang running hoặc waiting_pick (chống loop khi queue
+      // bị duplicate do user click nhiều lần "Gen frame này" / "Resume").
+      // Re-run hợp lệ phải đi qua /api/retry hoặc /api/skip (xoá job trước rồi push).
+      const existing = proj.jobs.get(item.frame_id);
+      if (existing && (existing.status === 'running' || existing.status === 'waiting_pick')) {
+        console.warn(`[dispatcher ${proj.slug}] skip ${item.frame_id} — already ${existing.status}`);
+        continue;
+      }
       const worker = await acquireWorker(proj);
       // Chạy frame async, không block dispatcher khi batch mode parallel
       const runP = (async () => {
@@ -1611,8 +1619,17 @@ const handleStart = async (proj, req, res) => {
     console.log(`[job ${proj.slug}] ⌫ reset state vì start từ frame 0`);
   }
   console.log(`[job ${proj.slug}] ▶▶ start from frame index ${fromIdx} (${cfg.frames[fromIdx].frame_id})`);
+  // Dedupe: skip nếu frame đã trong queue hoặc đang running/waiting_pick (user spam Resume)
+  const targetFid = cfg.frames[fromIdx].frame_id;
+  const inQueue = proj.queue.some(q => q.frame_id === targetFid);
+  const existing = proj.jobs.get(targetFid);
+  if (inQueue || (existing && (existing.status === 'running' || existing.status === 'waiting_pick'))) {
+    console.warn(`[job ${proj.slug}] skip Start ${targetFid} — đã ${existing?.status || 'in queue'}`);
+    res.json({ ok: true, fromIdx, mode: 'serial', slug: proj.slug, skipped: true });
+    return;
+  }
   // Serial mode: enqueue 1 frame, dispatcher sẽ pause sau xong (HITL pick → advance)
-  proj.queue.push({ frameIdx: fromIdx, frame_id: cfg.frames[fromIdx].frame_id, mode: 'serial' });
+  proj.queue.push({ frameIdx: fromIdx, frame_id: targetFid, mode: 'serial' });
   res.json({ ok: true, fromIdx, mode: 'serial', slug: proj.slug });
   runDispatcher(proj).catch(e => console.error(`[dispatcher ${proj.slug}] crash:`, e.message));
 };
@@ -1626,14 +1643,23 @@ const handleBatchStart = async (proj, req, res) => {
   const { frame_ids } = req.body || {};
   if (!Array.isArray(frame_ids) || frame_ids.length === 0) return res.status(400).json({ error: 'frame_ids[] bắt buộc' });
   const items = [];
+  const skipped = [];
   for (const fid of frame_ids) {
     const idx = cfg.frames.findIndex(f => f.frame_id === fid);
     if (idx < 0) return res.status(400).json({ error: `frame_id "${fid}" không tồn tại` });
+    // Dedupe: skip nếu đã có trong queue hoặc đang running/waiting_pick.
+    // Tránh trường hợp user click nhanh "Gen frame này" → push N entry → bot loop F01.
+    const inQueue = proj.queue.some(q => q.frame_id === fid);
+    const j = proj.jobs.get(fid);
+    if (inQueue || (j && (j.status === 'running' || j.status === 'waiting_pick'))) {
+      skipped.push(fid);
+      continue;
+    }
     items.push({ frameIdx: idx, frame_id: fid, mode: 'batch' });
   }
   for (const it of items) proj.queue.push(it);
-  console.log(`[batch ${proj.slug}] ▶▶ enqueued ${items.length} frames, ${proj.pagePool.length} workers parallel`);
-  res.json({ ok: true, count: items.length, workers: proj.pagePool.length, slug: proj.slug });
+  console.log(`[batch ${proj.slug}] ▶▶ enqueued ${items.length} frames, ${proj.pagePool.length} workers parallel` + (skipped.length ? ` — skipped ${skipped.length} dupe (${skipped.join(',')})` : ''));
+  res.json({ ok: true, count: items.length, skipped, workers: proj.pagePool.length, slug: proj.slug });
   runDispatcher(proj).catch(e => console.error(`[dispatcher ${proj.slug}] crash:`, e.message));
 };
 app.post('/api/batch-start', wrapProjectHandler(handleBatchStart));
