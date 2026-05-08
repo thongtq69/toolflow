@@ -144,6 +144,7 @@
     </div>
     <ul id="frame-list" class="overflow-y-auto scroll-thin flex-1"></ul>
     <div class="border-t border-zinc-800 p-2 space-y-1">
+      <button id="btn-edit-blocks" class="btn btn-zinc w-full text-xs" title="Sửa setting + style — prefix vào MỌI prompt của project này">⚙ Edit setting/style</button>
       <button id="btn-bulk-import" class="btn btn-zinc w-full text-xs" title="Paste nhiều prompt cho nhiều frame cùng lúc">📋 Bulk import prompts</button>
       <button id="btn-add-frame" class="btn btn-purple w-full text-xs">+ New Frame</button>
     </div>
@@ -269,6 +270,33 @@
     <div class="flex gap-2 mt-5 justify-end">
       <button id="btn-cancel-add" class="btn btn-zinc">Cancel</button>
       <button id="btn-submit-add" class="btn btn-emerald">+ Tạo frame</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit setting/style blocks modal -->
+<div id="blocks-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card p-5" style="max-width: 720px;">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-semibold">⚙ Edit setting + style — <span id="blocks-modal-slug" class="text-emerald-400 mono"></span></h3>
+      <button id="blocks-close" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </div>
+    <p class="text-xs text-zinc-400 mb-3">
+      <b>Setting</b> + <b>Style</b> được prepend vào MỌI prompt của project này.<br>
+      Prompt cuối khi gen = <span class="text-emerald-400 mono">setting + "\n\n" + style + "\n\n" + action</span>
+    </p>
+    <label class="text-[11px] text-zinc-500 mb-1 block">Setting (bối cảnh chung không đổi)</label>
+    <textarea id="blocks-setting" class="input mono w-full text-xs" rows="4" placeholder="VD: Modern eco resort 1000m2 in Vietnam..."></textarea>
+    <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">Style (look-and-feel toàn video)</label>
+    <textarea id="blocks-style" class="input mono w-full text-xs" rows="3" placeholder="VD: Photorealistic, cinematic 9:16..."></textarea>
+    <div class="flex gap-2 mt-3 justify-between items-center">
+      <span id="blocks-status" class="text-xs text-zinc-500"></span>
+      <div class="flex gap-2">
+        <button id="blocks-clear-setting" class="btn btn-zinc text-xs" title="Xoá setting → chỉ dùng style + action">Clear setting</button>
+        <button id="blocks-clear-style" class="btn btn-zinc text-xs" title="Xoá style → chỉ dùng setting + action">Clear style</button>
+        <button id="blocks-cancel" class="btn btn-zinc text-xs">Cancel</button>
+        <button id="blocks-save" class="btn btn-emerald text-xs">💾 Save</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1383,6 +1411,34 @@ $('btn-clear-action').onclick = async () => {
     toast('Đã xoá override', 'success');
     $('edit-action-form').style.display = 'none';
     fetchState();
+  }
+};
+
+// ─── Edit setting/style blocks ───
+$('btn-edit-blocks').onclick = () => {
+  $('blocks-modal-slug').textContent = currentSlug;
+  $('blocks-setting').value = appState.blocks?.setting || '';
+  $('blocks-style').value = appState.blocks?.style || '';
+  $('blocks-status').textContent = '';
+  $('blocks-modal').style.display = 'flex';
+  setTimeout(() => $('blocks-setting').focus(), 50);
+};
+$('blocks-close').onclick = $('blocks-cancel').onclick = () => { $('blocks-modal').style.display = 'none'; };
+$('blocks-clear-setting').onclick = () => { $('blocks-setting').value = ''; };
+$('blocks-clear-style').onclick = () => { $('blocks-style').value = ''; };
+$('blocks-save').onclick = async () => {
+  const setting = $('blocks-setting').value.trim();
+  const style = $('blocks-style').value.trim();
+  $('blocks-save').disabled = true;
+  $('blocks-status').textContent = 'Đang lưu...';
+  const r = await api('/api/blocks', { setting, style });
+  $('blocks-save').disabled = false;
+  if (r && !r.error) {
+    toast(`Đã lưu setting (${setting.length}ch) + style (${style.length}ch)`, 'success');
+    $('blocks-modal').style.display = 'none';
+    fetchState();
+  } else {
+    $('blocks-status').textContent = '';
   }
 };
 

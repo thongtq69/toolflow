@@ -1436,6 +1436,22 @@ const handleOverridePrompt = async (proj, req, res) => {
 app.post('/api/override-prompt', wrapProjectHandler(handleOverridePrompt));
 app.post('/api/p/:slug/override-prompt', wrapProjectHandler(handleOverridePrompt));
 
+// ─── Edit blocks (setting/style) — sửa frames.json blocks trực tiếp ───
+const handleBlocks = async (proj, req, res) => {
+  const { setting, style } = req.body || {};
+  // Đọc frames.json (raw) để giữ nguyên project meta + custom_frames merge
+  const raw = await fs.readFile(proj.framesPath, 'utf8');
+  const cfg = JSON.parse(raw);
+  cfg.blocks = cfg.blocks || {};
+  if (typeof setting === 'string') cfg.blocks.setting = setting;
+  if (typeof style === 'string') cfg.blocks.style = style;
+  await fs.writeFile(proj.framesPath, JSON.stringify(cfg, null, 2));
+  console.log(`[blocks ${proj.slug}] saved — setting=${(cfg.blocks.setting || '').length}ch  style=${(cfg.blocks.style || '').length}ch`);
+  res.json({ ok: true, blocks: cfg.blocks });
+};
+app.post('/api/blocks', wrapProjectHandler(handleBlocks));
+app.post('/api/p/:slug/blocks', wrapProjectHandler(handleBlocks));
+
 // ─── Add custom frame ───
 const handleAddFrame = async (proj, req, res) => {
   const { frame_id, topic, action, default_reference, reference_files = [], extra_references = [] } = req.body || {};
