@@ -52,15 +52,77 @@ const WORKER_COUNT = num(process.env.WORKERS, appConfig.workers); // số tab pa
 const rand = (a, b) => a + Math.random() * (b - a);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const humanPause = (min = 800, max = 2400) => sleep(rand(min, max));
-let lastGenAt = 0;
+let lastGenAt = 0; // GLOBAL — Flow rate-limit per-account, scoping per-project would 2x rate at IP level
+
+// ─── Project registry + per-project state ───
+const PROJECTS_REGISTRY_PATH = resolveDir('./projects.json');
+const projects = new Map(); // slug → project state
+
+const loadProjectsRegistry = () => {
+  try { return JSON.parse(fsSync.readFileSync(PROJECTS_REGISTRY_PATH, 'utf8')); }
+  catch { return { projects: [{ slug: 'default', name: 'Default', projectId: appConfig.projectId, workers: WORKER_COUNT }] }; }
+};
+const saveProjectsRegistry = (reg) => fsSync.writeFileSync(PROJECTS_REGISTRY_PATH, JSON.stringify(reg, null, 2));
+
+const makeProject = (meta) => {
+  const slug = meta.slug;
+  const root = resolveDir(`./projects/${slug}`);
+  const projectId = meta.projectId || '';
+  return {
+    slug,
+    name: meta.name || slug,
+    projectId,
+    projectUrl: projectId ? `https://labs.google/fx/tools/flow/project/${projectId}` : 'https://labs.google/fx/tools/flow',
+    workersTarget: meta.workers || 1,
+    framesPath: path.join(root, 'frames.json'),
+    outputDir: path.join(root, 'output'),
+    statePath: path.join(root, 'output', 'state.json'),
+    overridesPath: path.join(root, 'output', '_overrides.json'),
+    customFramesPath: path.join(root, 'output', '_custom_frames.json'),
+    jobs: new Map(),
+    queue: [],
+    jobAbort: false,
+    dispatching: false,
+    logBuffer: [],
+  };
+};
+
+const initProjects = () => {
+  const reg = loadProjectsRegistry();
+  for (const meta of (reg.projects || [])) projects.set(meta.slug, makeProject(meta));
+  if (projects.size === 0) {
+    // fallback: create default from appConfig
+    projects.set('default', makeProject({ slug: 'default', name: 'Default', projectId: appConfig.projectId, workers: WORKER_COUNT }));
+  }
+};
+initProjects();
+
+const getProject = (slug) => {
+  const p = projects.get(slug);
+  if (!p) throw Object.assign(new Error(`Project "${slug}" không tồn tại`), { httpStatus: 404 });
+  return p;
+};
+const defaultProject = () => projects.get('default') || projects.values().next().value;
 
 let ctx;
-const pagePool = []; // [{ page, busy, id, settingsVerified }]
-const acquireWorker = async () => {
-  // wait for free worker
+const pagePool = []; // [{ page, busy, id, settingsVerified, currentProjectSlug }]
+const acquireWorker = async (proj) => {
+  // wait for free worker; navigate to proj.projectUrl if worker last used a different project
   while (true) {
     const w = pagePool.find(w => !w.busy);
-    if (w) { w.busy = true; return w; }
+    if (w) {
+      w.busy = true;
+      if (proj && w.currentProjectSlug !== proj.slug) {
+        try {
+          await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch (e) {
+          console.warn(`[acquireWorker] ${w.id} re-nav to ${proj.slug} failed: ${e.message}`);
+        }
+        w.currentProjectSlug = proj.slug;
+        w.settingsVerified = false; // re-verify settings on new project
+      }
+      return w;
+    }
     await sleep(500);
   }
 };
@@ -96,74 +158,71 @@ console.warn = (...a) => { pushLog('warn', fmtArgs(a)); _origWarn(...a); };
 // ────────────────────────────────────────────────────────────
 // JOB STATE (multi-worker pipeline runner)
 // ────────────────────────────────────────────────────────────
-// jobs Map: frame_id → { workerId, status, frameIdx, frameId, total, attempts, lastError, lastVariants, startedAt, mode }
+// Each project has its own jobs Map: frame_id → { workerId, status, frameIdx, frameId, total, attempts, lastError, lastVariants, startedAt, mode }
 // status: running | waiting_pick | failed | done
 // mode: 'serial' | 'batch'  — serial = HITL pause; batch = parallel, no auto-advance
-const jobs = new Map();
-const queue = []; // pending [{ frameIdx, frame_id, mode }]
-let jobAbort = false;
-let dispatching = false;
 
-// Backward-compat single-job view (most-recent active or failed/done)
-const computePrimaryJob = () => {
-  if (jobs.size === 0) return { status: 'idle', frameIdx: -1, frameId: null, total: 0, attempts: 0, lastError: null, lastVariants: null, startedAt: null };
+// Backward-compat single-job view (most-recent active or failed/done) — scoped to a project
+const computePrimaryJob = (proj) => {
+  const map = proj.jobs;
+  if (map.size === 0) return { status: 'idle', frameIdx: -1, frameId: null, total: 0, attempts: 0, lastError: null, lastVariants: null, startedAt: null };
   // Prefer waiting_pick → running → failed → done
   const order = ['waiting_pick', 'running', 'failed', 'done'];
   for (const s of order) {
-    for (const j of jobs.values()) if (j.status === s) return j;
+    for (const j of map.values()) if (j.status === s) return j;
   }
-  return [...jobs.values()][0];
+  return [...map.values()][0];
 };
 
-const broadcastJob = () => {
-  const list = [...jobs.values()];
-  broadcast({ type: 'jobs', jobs: list, queue: queue.length, primary: computePrimaryJob() });
+const broadcastJob = (proj) => {
+  if (!proj) proj = defaultProject();
+  const list = [...proj.jobs.values()];
+  const primary = computePrimaryJob(proj);
+  broadcast({ type: 'jobs', slug: proj.slug, jobs: list, queue: proj.queue.length, primary });
   // legacy single-job event for older clients
-  broadcast({ type: 'job', job: computePrimaryJob() });
+  broadcast({ type: 'job', slug: proj.slug, job: primary });
 };
 
-const loadFrames = async () => {
-  const raw = await fs.readFile(FRAMES_PATH, 'utf8');
+const loadFrames = async (proj) => {
+  const raw = await fs.readFile(proj.framesPath, 'utf8');
   const cfg = JSON.parse(raw);
   // Merge custom frames vào sau builtin frames
-  const custom = await loadCustomFrames();
+  const custom = await loadCustomFrames(proj);
   cfg.frames = [...cfg.frames, ...custom];
   return cfg;
 };
-const loadState = async () => {
-  try { return JSON.parse(await fs.readFile(path.join(OUTPUT_DIR, 'state.json'), 'utf8')); }
+const loadState = async (proj) => {
+  try { return JSON.parse(await fs.readFile(proj.statePath, 'utf8')); }
   catch { return { picked: {} }; }
 };
-const saveState = async (s) => {
-  await fs.mkdir(OUTPUT_DIR, { recursive: true });
-  await fs.writeFile(path.join(OUTPUT_DIR, 'state.json'), JSON.stringify(s, null, 2));
+const saveState = async (proj, s) => {
+  await fs.mkdir(proj.outputDir, { recursive: true });
+  await fs.writeFile(proj.statePath, JSON.stringify(s, null, 2));
 };
 
 // ─── Overrides (prompt edits) ───
-const OVERRIDES_PATH = path.join(OUTPUT_DIR, '_overrides.json');
-const loadOverrides = async () => {
-  try { return JSON.parse(await fs.readFile(OVERRIDES_PATH, 'utf8')); }
+const loadOverrides = async (proj) => {
+  try { return JSON.parse(await fs.readFile(proj.overridesPath, 'utf8')); }
   catch { return {}; }
 };
-const saveOverrides = async (o) => {
-  await fs.mkdir(OUTPUT_DIR, { recursive: true });
-  await fs.writeFile(OVERRIDES_PATH, JSON.stringify(o, null, 2));
+const saveOverrides = async (proj, o) => {
+  await fs.mkdir(proj.outputDir, { recursive: true });
+  await fs.writeFile(proj.overridesPath, JSON.stringify(o, null, 2));
 };
 
 // ─── Custom frames (user added) ───
-const CUSTOM_FRAMES_PATH = path.join(OUTPUT_DIR, '_custom_frames.json');
-const loadCustomFrames = async () => {
-  try { return JSON.parse(await fs.readFile(CUSTOM_FRAMES_PATH, 'utf8')); }
+const loadCustomFrames = async (proj) => {
+  try { return JSON.parse(await fs.readFile(proj.customFramesPath, 'utf8')); }
   catch { return []; }
 };
-const saveCustomFrames = async (arr) => {
-  await fs.mkdir(OUTPUT_DIR, { recursive: true });
-  await fs.writeFile(CUSTOM_FRAMES_PATH, JSON.stringify(arr, null, 2));
+const saveCustomFrames = async (proj, arr) => {
+  await fs.mkdir(proj.outputDir, { recursive: true });
+  await fs.writeFile(proj.customFramesPath, JSON.stringify(arr, null, 2));
 };
 
 // ─── Archive prior attempt trước khi gen mới (preserve data) ───
-const archiveFrameIfExists = async (frame_id) => {
-  const dir = path.join(OUTPUT_DIR, frame_id);
+const archiveFrameIfExists = async (proj, frame_id) => {
+  const dir = path.join(proj.outputDir, frame_id);
   const metaPath = path.join(dir, 'meta.json');
   const existing = await fs.readFile(metaPath, 'utf8').then(JSON.parse).catch(() => null);
   if (!existing) return null;
@@ -176,10 +235,11 @@ const archiveFrameIfExists = async (frame_id) => {
       await fs.rename(path.join(dir, file), path.join(archiveDir, file)).catch(() => {});
     }
   }
-  console.log(`[archive] ${frame_id} → attempts/${archiveId}`);
+  console.log(`[archive ${proj.slug}] ${frame_id} → attempts/${archiveId}`);
   return archiveId;
 };
 
+// debugShot keeps writing to OUTPUT_DIR (legacy default) — fine for stage 2; per-project debug not required.
 const debugShot = async (label, page = null) => {
   try {
     const dir = path.join(OUTPUT_DIR, '_debug');
@@ -197,6 +257,8 @@ const debugShot = async (label, page = null) => {
 
 const initBrowser = async () => {
   const absProfile = path.resolve(USER_DATA_DIR);
+  const dp = defaultProject();
+  const initialUrl = dp.projectUrl || PROJECT_URL;
   console.log(`[init] launching browser (workers=${WORKER_COUNT}), profile=`, absProfile);
   ctx = await chromium.launchPersistentContext(absProfile, {
     headless: HEADLESS,
@@ -207,14 +269,14 @@ const initBrowser = async () => {
     let p;
     if (i === 0) p = ctx.pages()[0] || await ctx.newPage();
     else p = await ctx.newPage();
-    console.log(`[init W${i + 1}] navigate to project URL`);
-    await p.goto(PROJECT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    console.log(`[init W${i + 1}] navigate to project URL (${dp.slug})`);
+    await p.goto(initialUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p.waitForTimeout(4000);
     const url = p.url();
     if (url.includes('accounts.google.com') || url.includes('signin')) {
       console.error(`[init W${i + 1}] ❌ Browser bị redirect về login. Cookie expired?`);
     }
-    pagePool.push({ page: p, busy: false, id: `W${i + 1}`, settingsVerified: false });
+    pagePool.push({ page: p, busy: false, id: `W${i + 1}`, settingsVerified: false, currentProjectSlug: dp.slug });
     console.log(`[init W${i + 1}] ✓ ready at ${url}`);
   }
   console.log(`[init] ✓ ${pagePool.length} worker(s) ready`);
@@ -425,11 +487,14 @@ const ensureSettings = async (worker, { ratio = '9:16', count = 'x4' } = {}) => 
   worker.settingsVerified = true;
 };
 
-const ensureProjectRoot = async (page) => {
+const ensureProjectRoot = async (page, proj) => {
+  const targetUrl = proj?.projectUrl || PROJECT_URL;
+  const projectId = proj?.projectId || PROJECT_ID;
   const url = page.url();
-  if (!url.includes(`/project/${PROJECT_ID}`) || url.includes('/edit/')) {
-    console.log('  [nav] back to project root');
-    await page.goto(PROJECT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  if (!projectId) return; // no specific project — leave page as-is
+  if (!url.includes(`/project/${projectId}`) || url.includes('/edit/')) {
+    console.log(`  [nav ${proj?.slug || 'default'}] back to project root`);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
   }
 };
@@ -451,10 +516,10 @@ const findPromptTextbox = async (page) => {
 };
 
 // Single attempt — không retry. Throw nếu Google flag hoặc lỗi UI.
-const genFrameOnce = async ({ worker, prompt, referenceFiles = [] }) => {
+const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null }) => {
   const page = worker.page;
   const wid = worker.id;
-  // ─── Anti-detection: cooldown giữa 2 lần gen (global cho mọi worker — share rate limit)
+  // ─── Anti-detection: cooldown giữa 2 lần gen (GLOBAL cho mọi worker và project — share rate limit per IP/account)
   const elapsed = (Date.now() - lastGenAt) / 1000;
   if (lastGenAt > 0 && elapsed < COOLDOWN_AFTER_GEN_MIN) {
     const wait = rand(COOLDOWN_AFTER_GEN_MIN - elapsed, COOLDOWN_AFTER_GEN_MAX - elapsed);
@@ -462,7 +527,7 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [] }) => {
     await sleep(wait * 1000);
   }
 
-  await ensureProjectRoot(page);
+  await ensureProjectRoot(page, proj);
   await humanPause(1500, 3500); // wait page settle, mô phỏng user nhìn xung quanh
 
   await ensureSettings(worker, { ratio: '9:16', count: 'x4' });
@@ -586,11 +651,11 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [] }) => {
 };
 
 // Wrapper: gọi genFrameOnce, nếu Google flag → wait random 60-180s → retry, max N lần
-const genFrame = async ({ worker, prompt, referenceFiles = [], maxRetries = 3 }) => {
+const genFrame = async ({ worker, prompt, referenceFiles = [], maxRetries = 3, proj = null }) => {
   let lastErr;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const result = await genFrameOnce({ worker, prompt, referenceFiles });
+      const result = await genFrameOnce({ worker, prompt, referenceFiles, proj });
       if (attempt > 1) console.log(`  [${worker.id}] ✓ Retry attempt ${attempt} thành công`);
       return { variants: result, attempts: attempt };
     } catch (e) {
@@ -629,10 +694,10 @@ const downloadImage = async (url, filepath) => {
 // ────────────────────────────────────────────────────────────
 // JOB RUNNER (multi-worker, supports serial HITL + batch parallel)
 // ────────────────────────────────────────────────────────────
-const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
+const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
   const f = cfg.frames[frameIdx];
 
-  const overrides = await loadOverrides();
+  const overrides = await loadOverrides(proj);
   const ov = overrides[f.frame_id] || {};
   const effectiveAction = ov.action || f.action;
   const effectiveExtraRefs = Array.isArray(ov.extra_references)
@@ -640,7 +705,7 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
     : (Array.isArray(f.extra_references) ? f.extra_references : []);
   const fullPrompt = `${cfg.blocks.setting}\n\n${cfg.blocks.style}\n\n${effectiveAction}`;
 
-  const state = await loadState();
+  const state = await loadState(proj);
   const refs = [];
   // Resolve frame ref → file path. Ưu tiên: (1) variant đã pick → (2) fallback v1.png nếu có
   // → (3) null nếu frame chưa gen lần nào.
@@ -648,12 +713,12 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
     const picked = state.picked?.[frameId];
     if (picked) {
       const p = picked.filePath
-        ? (path.isAbsolute(picked.filePath) ? picked.filePath : path.join(OUTPUT_DIR, picked.filePath))
-        : path.join(OUTPUT_DIR, frameId, `v${(picked.pickedIdx ?? 0) + 1}.png`);
+        ? (path.isAbsolute(picked.filePath) ? picked.filePath : path.join(proj.outputDir, picked.filePath))
+        : path.join(proj.outputDir, frameId, `v${(picked.pickedIdx ?? 0) + 1}.png`);
       return { path: p, source: 'picked' };
     }
     // Fallback: dùng v1.png nếu frame đã gen nhưng chưa pick
-    const v1 = path.join(OUTPUT_DIR, frameId, 'v1.png');
+    const v1 = path.join(proj.outputDir, frameId, 'v1.png');
     if (fsSync.existsSync(v1)) return { path: v1, source: 'v1-fallback' };
     return null;
   };
@@ -661,24 +726,24 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
     const r = resolveFrameRef(f.default_reference);
     if (r) {
       refs.push(r.path);
-      if (r.source === 'v1-fallback') console.log(`[refs] ${f.frame_id}: default_reference ${f.default_reference} chưa pick → dùng v1.png fallback`);
-    } else console.warn(`[refs] ${f.frame_id}: default_reference ${f.default_reference} chưa gen — skip`);
+      if (r.source === 'v1-fallback') console.log(`[refs ${proj.slug}] ${f.frame_id}: default_reference ${f.default_reference} chưa pick → dùng v1.png fallback`);
+    } else console.warn(`[refs ${proj.slug}] ${f.frame_id}: default_reference ${f.default_reference} chưa gen — skip`);
   }
   for (const fid of effectiveExtraRefs) {
     if (fid === f.default_reference) continue; // dedupe
     const r = resolveFrameRef(fid);
     if (r) {
       refs.push(r.path);
-      if (r.source === 'v1-fallback') console.log(`[refs] ${f.frame_id}: extra_reference ${fid} chưa pick → dùng v1.png fallback`);
-    } else console.warn(`[refs] ${f.frame_id}: extra_reference ${fid} chưa gen — skip`);
+      if (r.source === 'v1-fallback') console.log(`[refs ${proj.slug}] ${f.frame_id}: extra_reference ${fid} chưa pick → dùng v1.png fallback`);
+    } else console.warn(`[refs ${proj.slug}] ${f.frame_id}: extra_reference ${fid} chưa gen — skip`);
   }
   if (Array.isArray(f.reference_files)) {
     for (const rf of f.reference_files) {
-      refs.push(path.isAbsolute(rf) ? rf : path.join(OUTPUT_DIR, rf));
+      refs.push(path.isAbsolute(rf) ? rf : path.join(proj.outputDir, rf));
     }
   }
 
-  await archiveFrameIfExists(f.frame_id);
+  await archiveFrameIfExists(proj, f.frame_id);
 
   const j = {
     workerId: worker.id,
@@ -692,30 +757,30 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
     startedAt: new Date().toISOString(),
     mode,
   };
-  jobs.set(f.frame_id, j);
-  broadcastJob();
+  proj.jobs.set(f.frame_id, j);
+  broadcastJob(proj);
 
-  console.log(`\n[job ${worker.id}] ▶ ${f.frame_id} (${frameIdx + 1}/${cfg.frames.length}) — ${f.topic}  mode=${mode}`);
-  console.log(`[job ${worker.id}]   refs=${refs.length} ${refs.map(r => path.basename(path.dirname(r)) + '/' + path.basename(r)).join(', ')}  prompt-len=${fullPrompt.length}`);
+  console.log(`\n[job ${proj.slug}/${worker.id}] ▶ ${f.frame_id} (${frameIdx + 1}/${cfg.frames.length}) — ${f.topic}  mode=${mode}`);
+  console.log(`[job ${proj.slug}/${worker.id}]   refs=${refs.length} ${refs.map(r => path.basename(path.dirname(r)) + '/' + path.basename(r)).join(', ')}  prompt-len=${fullPrompt.length}`);
 
   try {
-    const { variants, attempts } = await genFrame({ worker, prompt: fullPrompt, referenceFiles: refs, maxRetries: 3 });
-    if (jobAbort) {
+    const { variants, attempts } = await genFrame({ worker, prompt: fullPrompt, referenceFiles: refs, maxRetries: 3, proj });
+    if (proj.jobAbort) {
       j.status = 'failed';
       j.lastError = 'aborted';
-      jobs.set(f.frame_id, j);
-      broadcastJob();
+      proj.jobs.set(f.frame_id, j);
+      broadcastJob(proj);
       return;
     }
 
     const downloaded = [];
     for (let i = 0; i < variants.length; i++) {
-      const local = path.join(OUTPUT_DIR, f.frame_id, `v${i + 1}.png`);
+      const local = path.join(proj.outputDir, f.frame_id, `v${i + 1}.png`);
       await downloadImage(variants[i].fifeUrl, local);
       downloaded.push({ ...variants[i], localPath: local });
     }
 
-    const metaPath = path.join(OUTPUT_DIR, f.frame_id, 'meta.json');
+    const metaPath = path.join(proj.outputDir, f.frame_id, 'meta.json');
     await fs.writeFile(metaPath, JSON.stringify({
       frame_id: f.frame_id, prompt: fullPrompt, reference_files: refs,
       attempts, generatedAt: new Date().toISOString(), variants: downloaded
@@ -724,35 +789,35 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
     j.status = 'waiting_pick';
     j.attempts = attempts;
     j.lastVariants = downloaded;
-    jobs.set(f.frame_id, j);
-    broadcastJob();
-    console.log(`[job ${worker.id}] ⏸ ${f.frame_id} done (${attempts} attempts) — chờ pick variant`);
+    proj.jobs.set(f.frame_id, j);
+    broadcastJob(proj);
+    console.log(`[job ${proj.slug}/${worker.id}] ⏸ ${f.frame_id} done (${attempts} attempts) — chờ pick variant`);
   } catch (e) {
     j.status = 'failed';
     j.lastError = e.message;
-    jobs.set(f.frame_id, j);
-    broadcastJob();
-    console.error(`[job ${worker.id}] ✗ ${f.frame_id} failed: ${e.message}`);
+    proj.jobs.set(f.frame_id, j);
+    broadcastJob(proj);
+    console.error(`[job ${proj.slug}/${worker.id}] ✗ ${f.frame_id} failed: ${e.message}`);
   }
 };
 
 // Dispatcher: lấy frame từ queue, acquire worker, chạy. Trả về khi queue empty.
-const runDispatcher = async () => {
-  if (dispatching) return;
-  dispatching = true;
+const runDispatcher = async (proj) => {
+  if (proj.dispatching) return;
+  proj.dispatching = true;
   try {
-    const cfg = await loadFrames();
-    while (queue.length > 0 && !jobAbort) {
-      const item = queue.shift();
+    const cfg = await loadFrames(proj);
+    while (proj.queue.length > 0 && !proj.jobAbort) {
+      const item = proj.queue.shift();
       const f = cfg.frames[item.frameIdx];
       if (!f || f.frame_id !== item.frame_id) continue; // stale
-      const worker = await acquireWorker();
+      const worker = await acquireWorker(proj);
       // Chạy frame async, không block dispatcher khi batch mode parallel
       const runP = (async () => {
         try {
-          await runOneFrame(cfg, item.frameIdx, worker, item.mode);
+          await runOneFrame(proj, cfg, item.frameIdx, worker, item.mode);
         } catch (e) {
-          console.error(`[dispatcher] runOneFrame ${item.frame_id} threw:`, e.message);
+          console.error(`[dispatcher ${proj.slug}] runOneFrame ${item.frame_id} threw:`, e.message);
         } finally {
           releaseWorker(worker);
         }
@@ -768,21 +833,21 @@ const runDispatcher = async () => {
       }
     }
   } finally {
-    dispatching = false;
+    proj.dispatching = false;
   }
 };
 
 // Sau khi anh pick (serial mode), advance to next frame
-const advanceJob = async (lastFrameIdx, mode = 'serial') => {
-  if (jobAbort || mode === 'batch') return;
-  const cfg = await loadFrames();
+const advanceJob = async (proj, lastFrameIdx, mode = 'serial') => {
+  if (proj.jobAbort || mode === 'batch') return;
+  const cfg = await loadFrames(proj);
   const nextIdx = lastFrameIdx + 1;
   if (nextIdx >= cfg.frames.length) {
-    console.log('[job] ✓ all frames done');
+    console.log(`[job ${proj.slug}] ✓ all frames done`);
     return;
   }
-  queue.push({ frameIdx: nextIdx, frame_id: cfg.frames[nextIdx].frame_id, mode });
-  runDispatcher();
+  proj.queue.push({ frameIdx: nextIdx, frame_id: cfg.frames[nextIdx].frame_id, mode });
+  runDispatcher(proj);
 };
 
 const app = express();
@@ -790,10 +855,29 @@ app.use(express.json({ limit: '50mb' }));
 // Skip noisy paths (state polling + log SSE + static output) khỏi morgan log
 // → giảm spam SSE → giảm DOM thrash trên UI
 app.use(morgan('tiny', {
-  skip: (req) => /^\/(api\/(state|logs)|output|public|favicon)/.test(req.url),
+  skip: (req) => /^\/(api\/(state|logs)|output|public|favicon|projects\/.+\/output)/.test(req.url),
 }));
-app.use('/output', express.static(OUTPUT_DIR));
+// Legacy /output → default project (backward compat for UI)
+app.use('/output', (req, res, next) => express.static(defaultProject().outputDir)(req, res, next));
+// Per-project /projects/:slug/output
+app.use('/projects/:slug/output', (req, res, next) => {
+  const proj = projects.get(req.params.slug);
+  if (!proj) return res.status(404).end();
+  express.static(proj.outputDir)(req, res, next);
+});
 app.use(express.static(PUBLIC_DIR));
+
+// Wrap a per-project handler so legacy + slug routes share the same body.
+// `slugSource` is either a fixed slug string ('default') or a function (req) => slug
+const wrapProjectHandler = (handler) => async (req, res) => {
+  try {
+    const slug = req.params.slug || 'default';
+    const proj = getProject(slug);
+    return await handler(proj, req, res);
+  } catch (e) {
+    res.status(e.httpStatus || 500).json({ error: e.message });
+  }
+};
 
 app.get('/health', async (req, res) => {
   try {
@@ -845,190 +929,201 @@ app.post('/gen-frame', async (req, res) => {
 // ────────────────────────────────────────────────────────────
 // /api/* — UI ĐIỀU KHIỂN PIPELINE
 // ────────────────────────────────────────────────────────────
-app.get('/api/state', async (req, res) => {
+
+// ─── List projects ───
+app.get('/api/projects', async (req, res) => {
   try {
-    const cfg = await loadFrames();
-    const state = await loadState();
-    const overrides = await loadOverrides();
-    const customFrames = await loadCustomFrames();
-    const jobsList = [...jobs.values()];
-    const jobsByFrame = Object.fromEntries(jobsList.map(j => [j.frameId, j]));
-    const framesWithStatus = cfg.frames.map(f => {
-      const picked = state.picked?.[f.frame_id];
-      const override = overrides[f.frame_id];
-      let status = 'pending';
-      if (jobsByFrame[f.frame_id]) status = jobsByFrame[f.frame_id].status;
-      else if (picked) status = 'picked';
-      const hasOv = !!(override?.action || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
-      // Có ảnh trên đĩa? (đã gen ít nhất 1 lần — kể cả chưa pick)
-      const hasOutput = fsSync.existsSync(path.join(OUTPUT_DIR, f.frame_id, 'v1.png'));
-      return { ...f, status, picked, override, has_override: hasOv, has_output: hasOutput };
-    });
-    res.json({
-      frames: framesWithStatus,
-      blocks: cfg.blocks,
-      project: cfg.project,
-      state,
-      job: computePrimaryJob(),  // legacy single-job
-      jobs: jobsList,             // multi-job array
-      jobs_by_frame: jobsByFrame,
-      queue_size: queue.length,
-      workers: pagePool.map(w => ({ id: w.id, busy: w.busy, settingsVerified: w.settingsVerified })),
-      worker_count: pagePool.length,
-      overrides,
-      custom_frames: customFrames
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ─── Frame detail: current meta + attempts list ───
-app.get('/api/frame/:id', async (req, res) => {
-  try {
-    const id = req.params.id;
-    const dir = path.join(OUTPUT_DIR, id);
-    const result = { frame_id: id, current: null, attempts: [] };
-
-    const cur = await fs.readFile(path.join(dir, 'meta.json'), 'utf8').then(JSON.parse).catch(() => null);
-    if (cur) result.current = { ...cur, attempt_id: 'current' };
-
-    const attemptsDir = path.join(dir, 'attempts');
-    const aids = await fs.readdir(attemptsDir).catch(() => []);
-    for (const aid of aids.sort().reverse()) {
-      const meta = await fs.readFile(path.join(attemptsDir, aid, 'meta.json'), 'utf8')
-        .then(JSON.parse).catch(() => null);
-      if (meta) result.attempts.push({ ...meta, attempt_id: aid });
+    const arr = [];
+    for (const proj of projects.values()) {
+      let hasFrames = false;
+      try { await fs.access(proj.framesPath); hasFrames = true; } catch {}
+      arr.push({
+        slug: proj.slug,
+        name: proj.name,
+        projectId: proj.projectId,
+        projectUrl: proj.projectUrl,
+        workers: proj.workersTarget,
+        hasFrames,
+      });
     }
-    res.json(result);
+    res.json({ projects: arr });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ─── State (per-project) ───
+const handleState = async (proj, req, res) => {
+  const cfg = await loadFrames(proj);
+  const state = await loadState(proj);
+  const overrides = await loadOverrides(proj);
+  const customFrames = await loadCustomFrames(proj);
+  const jobsList = [...proj.jobs.values()];
+  const jobsByFrame = Object.fromEntries(jobsList.map(j => [j.frameId, j]));
+  const framesWithStatus = cfg.frames.map(f => {
+    const picked = state.picked?.[f.frame_id];
+    const override = overrides[f.frame_id];
+    let status = 'pending';
+    if (jobsByFrame[f.frame_id]) status = jobsByFrame[f.frame_id].status;
+    else if (picked) status = 'picked';
+    const hasOv = !!(override?.action || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
+    // Có ảnh trên đĩa? (đã gen ít nhất 1 lần — kể cả chưa pick)
+    const hasOutput = fsSync.existsSync(path.join(proj.outputDir, f.frame_id, 'v1.png'));
+    return { ...f, status, picked, override, has_override: hasOv, has_output: hasOutput };
+  });
+  res.json({
+    slug: proj.slug,
+    name: proj.name,
+    projectId: proj.projectId,
+    frames: framesWithStatus,
+    blocks: cfg.blocks,
+    project: cfg.project,
+    state,
+    job: computePrimaryJob(proj),  // legacy single-job
+    jobs: jobsList,                 // multi-job array
+    jobs_by_frame: jobsByFrame,
+    queue_size: proj.queue.length,
+    workers: pagePool.map(w => ({ id: w.id, busy: w.busy, settingsVerified: w.settingsVerified, currentProjectSlug: w.currentProjectSlug })),
+    worker_count: pagePool.length,
+    overrides,
+    custom_frames: customFrames
+  });
+};
+app.get('/api/state', wrapProjectHandler(handleState));
+app.get('/api/p/:slug/state', wrapProjectHandler(handleState));
+
+// ─── Frame detail ───
+const handleFrame = async (proj, req, res) => {
+  const id = req.params.id;
+  const dir = path.join(proj.outputDir, id);
+  const result = { frame_id: id, slug: proj.slug, current: null, attempts: [] };
+
+  const cur = await fs.readFile(path.join(dir, 'meta.json'), 'utf8').then(JSON.parse).catch(() => null);
+  if (cur) result.current = { ...cur, attempt_id: 'current' };
+
+  const attemptsDir = path.join(dir, 'attempts');
+  const aids = await fs.readdir(attemptsDir).catch(() => []);
+  for (const aid of aids.sort().reverse()) {
+    const meta = await fs.readFile(path.join(attemptsDir, aid, 'meta.json'), 'utf8')
+      .then(JSON.parse).catch(() => null);
+    if (meta) result.attempts.push({ ...meta, attempt_id: aid });
+  }
+  res.json(result);
+};
+app.get('/api/frame/:id', wrapProjectHandler(handleFrame));
+app.get('/api/p/:slug/frame/:id', wrapProjectHandler(handleFrame));
 
 // ─── Re-pick variant (đổi lựa chọn frame đã pick mà KHÔNG re-run) ───
-app.post('/api/repick', async (req, res) => {
-  try {
-    const { frame_id, attempt_id = 'current', variant_idx } = req.body || {};
-    if (!frame_id || variant_idx === undefined) return res.status(400).json({ error: 'frame_id và variant_idx bắt buộc' });
+const handleRepick = async (proj, req, res) => {
+  const { frame_id, attempt_id = 'current', variant_idx } = req.body || {};
+  if (!frame_id || variant_idx === undefined) return res.status(400).json({ error: 'frame_id và variant_idx bắt buộc' });
 
-    const metaPath = attempt_id === 'current'
-      ? path.join(OUTPUT_DIR, frame_id, 'meta.json')
-      : path.join(OUTPUT_DIR, frame_id, 'attempts', attempt_id, 'meta.json');
-    const meta = await fs.readFile(metaPath, 'utf8').then(JSON.parse).catch(() => null);
-    if (!meta) return res.status(404).json({ error: 'frame meta không tìm thấy' });
-    if (!meta.variants?.[variant_idx]) return res.status(400).json({ error: 'variant_idx invalid' });
+  const metaPath = attempt_id === 'current'
+    ? path.join(proj.outputDir, frame_id, 'meta.json')
+    : path.join(proj.outputDir, frame_id, 'attempts', attempt_id, 'meta.json');
+  const meta = await fs.readFile(metaPath, 'utf8').then(JSON.parse).catch(() => null);
+  if (!meta) return res.status(404).json({ error: 'frame meta không tìm thấy' });
+  if (!meta.variants?.[variant_idx]) return res.status(400).json({ error: 'variant_idx invalid' });
 
-    const filePath = attempt_id === 'current'
-      ? path.join(OUTPUT_DIR, frame_id, `v${variant_idx + 1}.png`)
-      : path.join(OUTPUT_DIR, frame_id, 'attempts', attempt_id, `v${variant_idx + 1}.png`);
+  const filePath = attempt_id === 'current'
+    ? path.join(proj.outputDir, frame_id, `v${variant_idx + 1}.png`)
+    : path.join(proj.outputDir, frame_id, 'attempts', attempt_id, `v${variant_idx + 1}.png`);
 
-    const state = await loadState();
-    state.picked = state.picked || {};
-    state.picked[frame_id] = {
-      mediaId: meta.variants[variant_idx].mediaId,
-      pickedIdx: variant_idx,
-      attempt_id,
-      pickedAt: new Date().toISOString(),
-      fifeUrl: meta.variants[variant_idx].fifeUrl,
-      filePath,
-    };
-    await saveState(state);
-    console.log(`[repick] ${frame_id} attempt=${attempt_id} v${variant_idx + 1}`);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+  const state = await loadState(proj);
+  state.picked = state.picked || {};
+  state.picked[frame_id] = {
+    mediaId: meta.variants[variant_idx].mediaId,
+    pickedIdx: variant_idx,
+    attempt_id,
+    pickedAt: new Date().toISOString(),
+    fifeUrl: meta.variants[variant_idx].fifeUrl,
+    filePath,
+  };
+  await saveState(proj, state);
+  console.log(`[repick ${proj.slug}] ${frame_id} attempt=${attempt_id} v${variant_idx + 1}`);
+  res.json({ ok: true });
+};
+app.post('/api/repick', wrapProjectHandler(handleRepick));
+app.post('/api/p/:slug/repick', wrapProjectHandler(handleRepick));
 
 // ─── Save / clear frame override (action prompt + extra_references) ───
-// Body: { frame_id, action?, extra_references? }
-//   - action === ''  → clear action override
-//   - action === undefined → don't touch action
-//   - extra_references === [] → clear refs override
-//   - extra_references === undefined → don't touch refs
-app.post('/api/override-prompt', async (req, res) => {
-  try {
-    const { frame_id, action, extra_references } = req.body || {};
-    if (!frame_id) return res.status(400).json({ error: 'frame_id bắt buộc' });
-    const overrides = await loadOverrides();
-    const cur = { ...(overrides[frame_id] || {}) };
+const handleOverridePrompt = async (proj, req, res) => {
+  const { frame_id, action, extra_references } = req.body || {};
+  if (!frame_id) return res.status(400).json({ error: 'frame_id bắt buộc' });
+  const overrides = await loadOverrides(proj);
+  const cur = { ...(overrides[frame_id] || {}) };
 
-    if (action !== undefined) {
-      if (action === '') delete cur.action;
-      else cur.action = action;
-    }
-    if (extra_references !== undefined) {
-      if (!Array.isArray(extra_references) || extra_references.length === 0) delete cur.extra_references;
-      else cur.extra_references = [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim()))];
-    }
-
-    const hasContent = cur.action != null
-      || (Array.isArray(cur.extra_references) && cur.extra_references.length > 0);
-
-    if (hasContent) {
-      cur.updatedAt = new Date().toISOString();
-      overrides[frame_id] = cur;
-      console.log(`[override] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  extra_refs=${(cur.extra_references || []).join(',') || '-'}`);
-    } else {
-      delete overrides[frame_id];
-      console.log(`[override] cleared ${frame_id}`);
-    }
-    await saveOverrides(overrides);
-    res.json({ ok: true, overrides });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  if (action !== undefined) {
+    if (action === '') delete cur.action;
+    else cur.action = action;
   }
-});
+  if (extra_references !== undefined) {
+    if (!Array.isArray(extra_references) || extra_references.length === 0) delete cur.extra_references;
+    else cur.extra_references = [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim()))];
+  }
+
+  const hasContent = cur.action != null
+    || (Array.isArray(cur.extra_references) && cur.extra_references.length > 0);
+
+  if (hasContent) {
+    cur.updatedAt = new Date().toISOString();
+    overrides[frame_id] = cur;
+    console.log(`[override ${proj.slug}] ${frame_id} updated — action=${cur.action ? cur.action.length + 'ch' : '-'}  extra_refs=${(cur.extra_references || []).join(',') || '-'}`);
+  } else {
+    delete overrides[frame_id];
+    console.log(`[override ${proj.slug}] cleared ${frame_id}`);
+  }
+  await saveOverrides(proj, overrides);
+  res.json({ ok: true, overrides });
+};
+app.post('/api/override-prompt', wrapProjectHandler(handleOverridePrompt));
+app.post('/api/p/:slug/override-prompt', wrapProjectHandler(handleOverridePrompt));
 
 // ─── Add custom frame ───
-app.post('/api/add-frame', async (req, res) => {
-  try {
-    const { frame_id, topic, action, default_reference, reference_files = [], extra_references = [] } = req.body || {};
-    if (!frame_id || !action) return res.status(400).json({ error: 'frame_id và action bắt buộc' });
-    // Conflict với builtin frames hoặc existing custom?
-    const cfg = await loadFrames();
-    if (cfg.frames.some(f => f.frame_id === frame_id)) return res.status(409).json({ error: `frame_id "${frame_id}" đã tồn tại` });
-    const custom = await loadCustomFrames();
-    const cleanExtraRefs = Array.isArray(extra_references)
-      ? [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim() && x !== default_reference))]
-      : [];
-    custom.push({
-      frame_id,
-      tag: `[${frame_id}-CUSTOM]`,
-      topic: topic || frame_id,
-      default_reference: default_reference || null,
-      extra_references: cleanExtraRefs,
-      selectable_references: [default_reference, ...cleanExtraRefs].filter(Boolean),
-      extra_anchor: null,
-      action,
-      reference_files,
-      custom: true,
-      createdAt: new Date().toISOString(),
-    });
-    await saveCustomFrames(custom);
-    console.log(`[custom] + ${frame_id}: ${topic || ''}`);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+const handleAddFrame = async (proj, req, res) => {
+  const { frame_id, topic, action, default_reference, reference_files = [], extra_references = [] } = req.body || {};
+  if (!frame_id || !action) return res.status(400).json({ error: 'frame_id và action bắt buộc' });
+  // Conflict với builtin frames hoặc existing custom?
+  const cfg = await loadFrames(proj);
+  if (cfg.frames.some(f => f.frame_id === frame_id)) return res.status(409).json({ error: `frame_id "${frame_id}" đã tồn tại` });
+  const custom = await loadCustomFrames(proj);
+  const cleanExtraRefs = Array.isArray(extra_references)
+    ? [...new Set(extra_references.filter(x => typeof x === 'string' && x.trim() && x !== default_reference))]
+    : [];
+  custom.push({
+    frame_id,
+    tag: `[${frame_id}-CUSTOM]`,
+    topic: topic || frame_id,
+    default_reference: default_reference || null,
+    extra_references: cleanExtraRefs,
+    selectable_references: [default_reference, ...cleanExtraRefs].filter(Boolean),
+    extra_anchor: null,
+    action,
+    reference_files,
+    custom: true,
+    createdAt: new Date().toISOString(),
+  });
+  await saveCustomFrames(proj, custom);
+  console.log(`[custom ${proj.slug}] + ${frame_id}: ${topic || ''}`);
+  res.json({ ok: true });
+};
+app.post('/api/add-frame', wrapProjectHandler(handleAddFrame));
+app.post('/api/p/:slug/add-frame', wrapProjectHandler(handleAddFrame));
 
 // ─── Delete custom frame ───
-app.delete('/api/custom-frame/:id', async (req, res) => {
-  try {
-    const id = req.params.id;
-    const custom = await loadCustomFrames();
-    const filtered = custom.filter(f => f.frame_id !== id);
-    if (filtered.length === custom.length) return res.status(404).json({ error: 'custom frame không tồn tại' });
-    await saveCustomFrames(filtered);
-    console.log(`[custom] - ${id}`);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+const handleDeleteCustomFrame = async (proj, req, res) => {
+  const id = req.params.id;
+  const custom = await loadCustomFrames(proj);
+  const filtered = custom.filter(f => f.frame_id !== id);
+  if (filtered.length === custom.length) return res.status(404).json({ error: 'custom frame không tồn tại' });
+  await saveCustomFrames(proj, filtered);
+  console.log(`[custom ${proj.slug}] - ${id}`);
+  res.json({ ok: true });
+};
+app.delete('/api/custom-frame/:id', wrapProjectHandler(handleDeleteCustomFrame));
+app.delete('/api/p/:slug/custom-frame/:id', wrapProjectHandler(handleDeleteCustomFrame));
 
+// ─── SSE log stream (legacy: emits global log buffer + default project's jobs) ───
 app.get('/api/logs', (req, res) => {
   res.set({
     'Content-Type': 'text/event-stream',
@@ -1039,35 +1134,39 @@ app.get('/api/logs', (req, res) => {
   res.flushHeaders();
   res.write(`: connected\n\n`);
   for (const e of logBuffer.slice(-300)) res.write(`data: ${JSON.stringify({ type: 'log', entry: e })}\n\n`);
-  res.write(`data: ${JSON.stringify({ type: 'jobs', jobs: [...jobs.values()], queue: queue.length, primary: computePrimaryJob() })}\n\n`);
-  res.write(`data: ${JSON.stringify({ type: 'job', job: computePrimaryJob() })}\n\n`);
+  const dp = defaultProject();
+  res.write(`data: ${JSON.stringify({ type: 'jobs', slug: dp.slug, jobs: [...dp.jobs.values()], queue: dp.queue.length, primary: computePrimaryJob(dp) })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: 'job', slug: dp.slug, job: computePrimaryJob(dp) })}\n\n`);
   sseClients.add(res);
   const heartbeat = setInterval(() => { try { res.write(`: ping\n\n`); } catch {} }, 15000);
   req.on('close', () => { clearInterval(heartbeat); sseClients.delete(res); });
 });
 
-app.post('/api/start', async (req, res) => {
-  jobAbort = false;
-  const cfg = await loadFrames();
-  const primary = computePrimaryJob();
+// ─── Start (serial mode, HITL pause) ───
+const handleStart = async (proj, req, res) => {
+  proj.jobAbort = false;
+  const cfg = await loadFrames(proj);
+  const primary = computePrimaryJob(proj);
   const fromIdx = req.body?.from_idx ?? (primary.frameIdx >= 0 ? primary.frameIdx + 1 : 0);
   if (fromIdx < 0 || fromIdx >= cfg.frames.length) return res.status(400).json({ error: 'from_idx out of range' });
   if (fromIdx === 0 && req.body?.reset_state !== false) {
-    await saveState({ picked: {}, startedAt: new Date().toISOString() });
-    jobs.clear();
-    console.log('[job] ⌫ reset state vì start từ frame 0');
+    await saveState(proj, { picked: {}, startedAt: new Date().toISOString() });
+    proj.jobs.clear();
+    console.log(`[job ${proj.slug}] ⌫ reset state vì start từ frame 0`);
   }
-  console.log(`[job] ▶▶ start from frame index ${fromIdx} (${cfg.frames[fromIdx].frame_id})`);
+  console.log(`[job ${proj.slug}] ▶▶ start from frame index ${fromIdx} (${cfg.frames[fromIdx].frame_id})`);
   // Serial mode: enqueue 1 frame, dispatcher sẽ pause sau xong (HITL pick → advance)
-  queue.push({ frameIdx: fromIdx, frame_id: cfg.frames[fromIdx].frame_id, mode: 'serial' });
-  res.json({ ok: true, fromIdx, mode: 'serial' });
-  runDispatcher().catch(e => console.error('[dispatcher] crash:', e.message));
-});
+  proj.queue.push({ frameIdx: fromIdx, frame_id: cfg.frames[fromIdx].frame_id, mode: 'serial' });
+  res.json({ ok: true, fromIdx, mode: 'serial', slug: proj.slug });
+  runDispatcher(proj).catch(e => console.error(`[dispatcher ${proj.slug}] crash:`, e.message));
+};
+app.post('/api/start', wrapProjectHandler(handleStart));
+app.post('/api/p/:slug/start', wrapProjectHandler(handleStart));
 
-// Batch parallel: enqueue nhiều frames, workers chạy song song, KHÔNG auto-advance
-app.post('/api/batch-start', async (req, res) => {
-  jobAbort = false;
-  const cfg = await loadFrames();
+// ─── Batch start (parallel, no auto-advance) ───
+const handleBatchStart = async (proj, req, res) => {
+  proj.jobAbort = false;
+  const cfg = await loadFrames(proj);
   const { frame_ids } = req.body || {};
   if (!Array.isArray(frame_ids) || frame_ids.length === 0) return res.status(400).json({ error: 'frame_ids[] bắt buộc' });
   const items = [];
@@ -1076,19 +1175,22 @@ app.post('/api/batch-start', async (req, res) => {
     if (idx < 0) return res.status(400).json({ error: `frame_id "${fid}" không tồn tại` });
     items.push({ frameIdx: idx, frame_id: fid, mode: 'batch' });
   }
-  for (const it of items) queue.push(it);
-  console.log(`[batch] ▶▶ enqueued ${items.length} frames, ${pagePool.length} workers parallel`);
-  res.json({ ok: true, count: items.length, workers: pagePool.length });
-  runDispatcher().catch(e => console.error('[dispatcher] crash:', e.message));
-});
+  for (const it of items) proj.queue.push(it);
+  console.log(`[batch ${proj.slug}] ▶▶ enqueued ${items.length} frames, ${pagePool.length} workers parallel`);
+  res.json({ ok: true, count: items.length, workers: pagePool.length, slug: proj.slug });
+  runDispatcher(proj).catch(e => console.error(`[dispatcher ${proj.slug}] crash:`, e.message));
+};
+app.post('/api/batch-start', wrapProjectHandler(handleBatchStart));
+app.post('/api/p/:slug/batch-start', wrapProjectHandler(handleBatchStart));
 
-app.post('/api/pick', async (req, res) => {
+// ─── Pick variant ───
+const handlePick = async (proj, req, res) => {
   const { frame_id, variant_idx } = req.body || {};
-  const j = jobs.get(frame_id);
+  const j = proj.jobs.get(frame_id);
   if (!j) return res.status(404).json({ error: `no active job for ${frame_id}` });
   if (j.status !== 'waiting_pick') return res.status(409).json({ error: `${frame_id} not waiting_pick (status=${j.status})` });
   if (!j.lastVariants?.[variant_idx]) return res.status(400).json({ error: 'invalid variant_idx' });
-  const state = await loadState();
+  const state = await loadState(proj);
   state.picked = state.picked || {};
   state.picked[frame_id] = {
     mediaId: j.lastVariants[variant_idx].mediaId,
@@ -1096,67 +1198,79 @@ app.post('/api/pick', async (req, res) => {
     pickedAt: new Date().toISOString(),
     fifeUrl: j.lastVariants[variant_idx].fifeUrl,
   };
-  await saveState(state);
-  jobs.delete(frame_id);
-  broadcastJob();
-  console.log(`[job] ✓ ${frame_id} picked v${variant_idx + 1}`);
+  await saveState(proj, state);
+  proj.jobs.delete(frame_id);
+  broadcastJob(proj);
+  console.log(`[job ${proj.slug}] ✓ ${frame_id} picked v${variant_idx + 1}`);
   res.json({ ok: true });
   if (j.mode === 'serial') {
-    (async () => { try { await advanceJob(j.frameIdx, 'serial'); } catch (e) { console.error(e.message); } })();
+    (async () => { try { await advanceJob(proj, j.frameIdx, 'serial'); } catch (e) { console.error(e.message); } })();
   }
-});
+};
+app.post('/api/pick', wrapProjectHandler(handlePick));
+app.post('/api/p/:slug/pick', wrapProjectHandler(handlePick));
 
-app.post('/api/skip', async (req, res) => {
-  // Skip = pick gì cũng được, chỉ advance. Target: frame_id hoặc primary.
+// ─── Skip ───
+const handleSkip = async (proj, req, res) => {
   const { frame_id } = req.body || {};
-  const target = frame_id || computePrimaryJob().frameId;
-  const j = jobs.get(target);
+  const target = frame_id || computePrimaryJob(proj).frameId;
+  const j = proj.jobs.get(target);
   if (!j) return res.status(404).json({ error: `no active job for ${target}` });
   if (!['waiting_pick', 'failed'].includes(j.status)) return res.status(409).json({ error: `cannot skip in ${j.status}` });
-  console.log(`[job] ⏭ skip ${target}`);
-  jobs.delete(target);
-  broadcastJob();
+  console.log(`[job ${proj.slug}] ⏭ skip ${target}`);
+  proj.jobs.delete(target);
+  broadcastJob(proj);
   res.json({ ok: true });
   if (j.mode === 'serial') {
-    (async () => { try { await advanceJob(j.frameIdx, 'serial'); } catch (e) { console.error(e.message); } })();
+    (async () => { try { await advanceJob(proj, j.frameIdx, 'serial'); } catch (e) { console.error(e.message); } })();
   }
-});
+};
+app.post('/api/skip', wrapProjectHandler(handleSkip));
+app.post('/api/p/:slug/skip', wrapProjectHandler(handleSkip));
 
-app.post('/api/retry', async (req, res) => {
+// ─── Retry ───
+const handleRetry = async (proj, req, res) => {
   const { frame_id } = req.body || {};
-  const target = frame_id || computePrimaryJob().frameId;
-  const j = jobs.get(target);
+  const target = frame_id || computePrimaryJob(proj).frameId;
+  const j = proj.jobs.get(target);
   if (!j) return res.status(404).json({ error: `no active job for ${target}` });
   if (!['failed', 'waiting_pick'].includes(j.status)) return res.status(409).json({ error: `cannot retry in ${j.status}` });
-  const cfg = await loadFrames();
   const idx = j.frameIdx;
   const mode = j.mode;
-  jobs.delete(target);
-  console.log(`[job] ↻ retry ${target}`);
+  proj.jobs.delete(target);
+  console.log(`[job ${proj.slug}] ↻ retry ${target}`);
   res.json({ ok: true });
   // Re-enqueue
-  queue.push({ frameIdx: idx, frame_id: target, mode });
-  runDispatcher().catch(e => console.error(e.message));
-});
+  proj.queue.push({ frameIdx: idx, frame_id: target, mode });
+  runDispatcher(proj).catch(e => console.error(e.message));
+};
+app.post('/api/retry', wrapProjectHandler(handleRetry));
+app.post('/api/p/:slug/retry', wrapProjectHandler(handleRetry));
 
-app.post('/api/stop', (req, res) => {
-  jobAbort = true;
-  queue.length = 0;
-  for (const j of jobs.values()) if (j.status === 'running') j.status = 'failed', j.lastError = 'stopped';
-  broadcastJob();
-  console.log('[job] ■ stop signal sent — queue cleared, abort sau frame đang chạy');
+// ─── Stop ───
+const handleStop = (proj, req, res) => {
+  proj.jobAbort = true;
+  proj.queue.length = 0;
+  for (const j of proj.jobs.values()) if (j.status === 'running') { j.status = 'failed'; j.lastError = 'stopped'; }
+  broadcastJob(proj);
+  console.log(`[job ${proj.slug}] ■ stop signal sent — queue cleared, abort sau frame đang chạy`);
   res.json({ ok: true });
-});
+};
+app.post('/api/stop', wrapProjectHandler(handleStop));
+app.post('/api/p/:slug/stop', wrapProjectHandler(handleStop));
 
-app.post('/api/reset', async (req, res) => {
-  await saveState({ picked: {}, resetAt: new Date().toISOString() });
-  jobs.clear();
-  queue.length = 0;
-  jobAbort = false;
-  broadcastJob();
-  console.log('[job] ⌫ reset state.json + job');
+// ─── Reset ───
+const handleReset = async (proj, req, res) => {
+  await saveState(proj, { picked: {}, resetAt: new Date().toISOString() });
+  proj.jobs.clear();
+  proj.queue.length = 0;
+  proj.jobAbort = false;
+  broadcastJob(proj);
+  console.log(`[job ${proj.slug}] ⌫ reset state.json + jobs`);
   res.json({ ok: true });
-});
+};
+app.post('/api/reset', wrapProjectHandler(handleReset));
+app.post('/api/p/:slug/reset', wrapProjectHandler(handleReset));
 
 // ────────────────────────────────────────────────────────────
 // SETUP / CONFIG (UI-driven first-run + runtime settings)
@@ -1221,14 +1335,20 @@ app.put('/api/config', async (req, res) => {
 
     let restartRequired = false;
     let reNavigated = false;
-    // Apply project change immediately
+    // Apply project change immediately — also sync default project state
     if (updates.projectId && updates.projectId !== PROJECT_ID) {
       PROJECT_ID = updates.projectId;
       PROJECT_URL = `https://labs.google/fx/tools/flow/project/${PROJECT_ID}`;
+      const dp = defaultProject();
+      if (dp) {
+        dp.projectId = PROJECT_ID;
+        dp.projectUrl = PROJECT_URL;
+      }
       for (const w of pagePool) {
         try {
           await w.page.goto(PROJECT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
           w.settingsVerified = false;
+          if (dp) w.currentProjectSlug = dp.slug;
         } catch (e) { console.error(`[config] re-nav ${w.id} failed:`, e.message); }
       }
       reNavigated = true;
@@ -1338,27 +1458,25 @@ app.get('/api/setup/status', async (req, res) => {
 });
 
 // Upload reference image — body { filename, base64 } → save vào output/_uploads/ → trả path
-app.post('/api/upload-reference', async (req, res) => {
-  try {
-    const { filename, base64 } = req.body || {};
-    if (!filename || !base64) return res.status(400).json({ error: 'filename + base64 bắt buộc' });
-    // Strip data URL prefix nếu có ("data:image/png;base64,...")
-    const b64 = base64.replace(/^data:[^;]+;base64,/, '');
-    const buf = Buffer.from(b64, 'base64');
-    if (buf.length === 0) return res.status(400).json({ error: 'base64 invalid' });
-    if (buf.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'File quá lớn (>20MB)' });
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const uploadsDir = path.join(OUTPUT_DIR, '_uploads');
-    await fs.mkdir(uploadsDir, { recursive: true });
-    const filepath = path.join(uploadsDir, `${ts}_${safeName}`);
-    await fs.writeFile(filepath, buf);
-    console.log(`[upload] saved ${path.basename(filepath)} (${(buf.length / 1024).toFixed(1)} KB)`);
-    res.json({ ok: true, path: filepath, size: buf.length });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+const handleUploadReference = async (proj, req, res) => {
+  const { filename, base64 } = req.body || {};
+  if (!filename || !base64) return res.status(400).json({ error: 'filename + base64 bắt buộc' });
+  // Strip data URL prefix nếu có ("data:image/png;base64,...")
+  const b64 = base64.replace(/^data:[^;]+;base64,/, '');
+  const buf = Buffer.from(b64, 'base64');
+  if (buf.length === 0) return res.status(400).json({ error: 'base64 invalid' });
+  if (buf.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'File quá lớn (>20MB)' });
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+  const tsName = new Date().toISOString().replace(/[:.]/g, '-');
+  const uploadsDir = path.join(proj.outputDir, '_uploads');
+  await fs.mkdir(uploadsDir, { recursive: true });
+  const filepath = path.join(uploadsDir, `${tsName}_${safeName}`);
+  await fs.writeFile(filepath, buf);
+  console.log(`[upload ${proj.slug}] saved ${path.basename(filepath)} (${(buf.length / 1024).toFixed(1)} KB)`);
+  res.json({ ok: true, path: filepath, size: buf.length });
+};
+app.post('/api/upload-reference', wrapProjectHandler(handleUploadReference));
+app.post('/api/p/:slug/upload-reference', wrapProjectHandler(handleUploadReference));
 
 // Trả nội dung frames.example.json để wizard "Dùng template mặc định" pre-fill textarea
 app.get('/api/setup/template-frames', async (req, res) => {
