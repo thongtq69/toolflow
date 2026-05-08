@@ -745,7 +745,11 @@ const advanceJob = async (lastFrameIdx, mode = 'serial') => {
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
-app.use(morgan('tiny'));
+// Skip noisy paths (state polling + log SSE + static output) khỏi morgan log
+// → giảm spam SSE → giảm DOM thrash trên UI
+app.use(morgan('tiny', {
+  skip: (req) => /^\/(api\/(state|logs)|output|public|favicon)/.test(req.url),
+}));
 app.use('/output', express.static(OUTPUT_DIR));
 app.use(express.static(PUBLIC_DIR));
 

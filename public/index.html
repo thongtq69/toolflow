@@ -412,7 +412,7 @@ function appendLog(entry) {
   div.className = 'log-line log-' + entry.level;
   div.innerHTML = `<span class="log-ts">${fmt(entry.ts)}</span> ${escapeHtml(entry.text)}`;
   stream.appendChild(div);
-  while (stream.children.length > 600) stream.removeChild(stream.firstChild);
+  while (stream.children.length > 250) stream.removeChild(stream.firstChild);
   if ($('log-autoscroll').checked) stream.scrollTop = stream.scrollHeight;
 }
 
@@ -627,12 +627,14 @@ function renderCenter() {
     grid.innerHTML = `<div class="col-span-2 text-center py-12 text-zinc-500"><div class="text-sm">Chưa có variants. Bấm Start hoặc click frame để xem attempt cũ.</div></div>`;
     return;
   }
+  // Cache-bust theo gen-timestamp (chỉ đổi khi gen mới), không phải Date.now() — giảm tải re-download
+  const cacheKey = encodeURIComponent(j.startedAt || j.frameId || '');
   variants.forEach((v, idx) => {
     const card = document.createElement('div');
     card.className = 'variant-card bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800';
     card.innerHTML = `
       <div class="aspect-[9/16] bg-black overflow-hidden">
-        <img src="/output/${encodeURIComponent(f.frame_id)}/v${idx + 1}.png?t=${Date.now()}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.opacity=0.3">
+        <img src="/output/${encodeURIComponent(f.frame_id)}/v${idx + 1}.png?v=${cacheKey}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.opacity=0.3">
       </div>
       <div class="p-2 flex items-center justify-between">
         <div class="text-xs">
@@ -733,7 +735,9 @@ function renderViewMode(f) {
   variants.forEach((v, idx) => {
     const card = document.createElement('div');
     card.className = 'variant-card bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800';
-    const imgUrl = `${pathBase}/v${idx + 1}.png?t=${Date.now()}`;
+    // Cache-bust theo generatedAt (chỉ đổi khi gen mới) hoặc attempt_id, không Date.now() — giảm re-download
+    const ck = encodeURIComponent(meta.generatedAt || meta.attempt_id || 'cur');
+    const imgUrl = `${pathBase}/v${idx + 1}.png?v=${ck}`;
     const isPicked = appState.state?.picked?.[f.frame_id]?.variant_idx === idx
       && (viewState.attemptId === 'current'); // only mark picked on current
     let btnHtml;
