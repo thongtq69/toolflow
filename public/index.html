@@ -725,9 +725,24 @@ async function openNewProjectPrompt() {
       body: JSON.stringify({ slug, name, projectId, workers, separateProfile })
     }).then(r => r.json());
     if (r.error) { toast(r.error, 'error'); return; }
-    const acctMsg = separateProfile ? ` (account RIÊNG — login fresh khi restart)` : ` (share account)`;
-    toast(`Đã tạo project ${name}${acctMsg}. Restart server để launch workers.`, 'success');
+    const acctMsg = separateProfile ? ` (account RIÊNG — browser sẽ mở để anh login)` : ` (share account)`;
+    toast(`Đã tạo project ${name}${acctMsg}. Worker đang launch (~5-10s)...`, 'success');
     await fetchProjects();
+    // Auto switch sang project mới + đợi workers ready rồi báo
+    const newSlug = r.slug;
+    setTimeout(async () => {
+      switchProject(newSlug);
+      // Poll workers ready (max 30s)
+      for (let i = 0; i < 15; i++) {
+        await new Promise(rs => setTimeout(rs, 2000));
+        const st = await fetch(`/api/p/${encodeURIComponent(newSlug)}/state`).then(rs => rs.json()).catch(() => ({}));
+        if (st.workers?.length > 0) {
+          toast(`✓ ${st.workers.length} worker ready cho ${name}`, 'success');
+          return;
+        }
+      }
+      toast(`Workers chưa launch xong — kiểm tra log + login nếu account riêng`, 'error');
+    }, 500);
   } catch (e) {
     toast('Lỗi: ' + e.message, 'error');
   }

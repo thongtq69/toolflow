@@ -9,18 +9,11 @@
       "createdAt": "2026-05-08T08:23:00.000Z"
     },
     {
-      "slug": "2",
-      "name": "2",
-      "projectId": "2",
-      "workers": 1,
-      "createdAt": "2026-05-08T08:52:52.255Z"
-    },
-    {
-      "slug": "cafe",
-      "name": "Cafe",
-      "projectId": "1a1a492a-eb3a-4fc3-a4ee-a8a6f0eedd16",
-      "workers": 1,
-      "createdAt": "2026-05-08T12:06:41.230Z"
+      "slug": "p-123",
+      "name": "123",
+      "projectId": "ec14963c-63f0-4ab9-ae65-cf13e1c5bb14",
+      "workers": 2,
+      "createdAt": "2026-05-08T13:59:34.886Z"
     }
   ]
 }

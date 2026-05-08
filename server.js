@@ -203,6 +203,15 @@ const recoverWorkerPage = async (proj, w) => {
 
 const acquireWorker = async (proj) => {
   if (!proj) proj = defaultProject();
+  // Auto-launch workers nếu pagePool empty (project mới tạo run-time chưa launch).
+  if (proj.pagePool.length === 0) {
+    console.log(`[acquireWorker ${proj.slug}] pagePool empty → tự launch workers`);
+    try { await launchProjectWorkers(proj); }
+    catch (e) { console.error(`[acquireWorker ${proj.slug}] launchProjectWorkers fail: ${e.message}`); }
+    if (proj.pagePool.length === 0) {
+      throw new Error(`Project "${proj.slug}" không có worker — projectId không hợp lệ hoặc browser launch fail. Check log + restart server.`);
+    }
+  }
   while (true) {
     const w = proj.pagePool.find(w => !w.busy);
     if (w) {
@@ -211,7 +220,6 @@ const acquireWorker = async (proj) => {
           await recoverWorkerPage(proj, w);
         } catch (e) {
           console.error(`[acquireWorker ${proj.slug}] ${w.id} recover failed: ${e.message}`);
-          // Vẫn return — gen sẽ fail clean với error rõ, không deadlock infinite
         }
       }
       w.busy = true;
@@ -386,52 +394,64 @@ const initBrowser = async () => {
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let firstPageUsed = false;
   for (const proj of projects.values()) {
-    const target = proj.workersTarget || 1;
-    if (!proj.projectUrl || proj.projectUrl === 'https://labs.google/fx/tools/flow') {
-      console.warn(`[init] project ${proj.slug} chưa có projectId — skip workers`);
-      continue;
-    }
-    if (!UUID_RE.test(proj.projectId)) {
-      console.warn(`[init] project ${proj.slug}: projectId "${proj.projectId}" không phải UUID — skip workers`);
-      continue;
-    }
-
-    // Project ctx: nếu profileDir riêng → launch ctx mới, ngược lại dùng global
-    let projCtx;
-    if (proj.profileDir) {
-      projCtx = await launchCtx(proj.profileDir);
-      console.log(`[init] project ${proj.slug} dùng tài khoản riêng: ${proj.profileDir}`);
-    } else {
-      projCtx = ctx;
-    }
-    proj.ctx = projCtx;
-
-    for (let i = 0; i < target; i++) {
-      let p;
-      // Reuse first page của shared ctx (chỉ 1 lần)
-      if (!firstPageUsed && projCtx === ctx) {
-        p = projCtx.pages()[0] || await projCtx.newPage();
-        firstPageUsed = true;
-      } else {
-        p = await projCtx.newPage();
-      }
-      const wid = `${proj.slug}-W${i + 1}`;
-      console.log(`[init ${wid}] navigate to ${proj.projectUrl}`);
-      try {
-        await p.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await p.waitForTimeout(4000);
-        const url = p.url();
-        if (url.includes('accounts.google.com') || url.includes('signin')) {
-          console.error(`[init ${wid}] ❌ Browser bị redirect về login. Cookie expired? (project profile=${proj.profileDir || 'shared'})`);
-        }
-        proj.pagePool.push({ page: p, busy: false, id: wid, settingsVerified: false, projectSlug: proj.slug });
-        console.log(`[init ${wid}] ✓ ready at ${url}`);
-      } catch (e) {
-        console.error(`[init ${wid}] ❌ failed: ${e.message}`);
-      }
-    }
+    await launchProjectWorkers(proj, { reuseFirstPage: !firstPageUsed });
+    if (proj.pagePool.length > 0 && !proj.profileDir) firstPageUsed = true;
   }
   console.log(`[init] ✓ ${allWorkers().length} worker(s) ready across ${projects.size} project(s) trong ${ctxByProfile.size} browser ctx`);
+};
+
+// Launch workers cho 1 project: tạo ctx (nếu profile riêng) + N pages.
+// Gọi từ initBrowser (startup) và POST /api/projects (tạo project run-time).
+// idempotent: nếu pagePool đã đủ workers → no-op.
+const UUID_RE_GLOBAL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const launchProjectWorkers = async (proj, { reuseFirstPage = false } = {}) => {
+  const target = proj.workersTarget || 1;
+  if (proj.pagePool.length >= target) return; // đủ rồi
+  if (!proj.projectUrl || proj.projectUrl === 'https://labs.google/fx/tools/flow') {
+    console.warn(`[launch ${proj.slug}] chưa có projectId — skip workers`);
+    return;
+  }
+  if (!UUID_RE_GLOBAL.test(proj.projectId)) {
+    console.warn(`[launch ${proj.slug}] projectId "${proj.projectId}" không phải UUID — skip workers`);
+    return;
+  }
+
+  let projCtx;
+  if (proj.profileDir) {
+    projCtx = await launchCtx(proj.profileDir);
+    console.log(`[launch ${proj.slug}] tài khoản riêng: ${proj.profileDir}`);
+  } else {
+    if (!ctx) {
+      const sharedAbsProfile = path.resolve(USER_DATA_DIR);
+      ctx = await launchCtx(sharedAbsProfile);
+    }
+    projCtx = ctx;
+  }
+  proj.ctx = projCtx;
+
+  const startIdx = proj.pagePool.length;
+  for (let i = startIdx; i < target; i++) {
+    let p;
+    if (reuseFirstPage && projCtx === ctx && i === startIdx) {
+      p = projCtx.pages()[0] || await projCtx.newPage();
+    } else {
+      p = await projCtx.newPage();
+    }
+    const wid = `${proj.slug}-W${i + 1}`;
+    console.log(`[launch ${wid}] navigate to ${proj.projectUrl}`);
+    try {
+      await p.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await p.waitForTimeout(4000);
+      const url = p.url();
+      if (url.includes('accounts.google.com') || url.includes('signin')) {
+        console.error(`[launch ${wid}] ❌ Browser bị redirect về login. Cookie expired? (profile=${proj.profileDir || 'shared'})`);
+      }
+      proj.pagePool.push({ page: p, busy: false, id: wid, settingsVerified: false, projectSlug: proj.slug });
+      console.log(`[launch ${wid}] ✓ ready at ${url}`);
+    } catch (e) {
+      console.error(`[launch ${wid}] ❌ failed: ${e.message}`);
+    }
+  }
 };
 
 // x4 trigger 4 request batchGenerateImages liên tiếp. Track 2 counter:
@@ -1225,11 +1245,20 @@ app.post('/api/projects', async (req, res) => {
       await fs.writeFile(framesDest, JSON.stringify({ project: { name, flow_project_id: projectId }, blocks: { setting: '', style: '' }, frames: [] }, null, 2));
     }
 
-    // Add project struct in-memory (workers chưa launch — restart để có)
-    projects.set(slug, makeProject({ slug, name, projectId, workers, profileDir }));
+    // Add project struct in-memory + auto-launch workers (không cần restart)
+    const proj = makeProject({ slug, name, projectId, workers, profileDir });
+    projects.set(slug, proj);
 
-    console.log(`[projects] + ${slug} (${projectId}) — restart server để launch ${workers} worker(s)`);
-    res.json({ ok: true, slug, restartRequired: true });
+    // Launch workers run-time — không block response
+    res.json({ ok: true, slug, workersLaunching: workers });
+    (async () => {
+      try {
+        await launchProjectWorkers(proj);
+        console.log(`[projects] + ${slug} (${projectId}) — ${proj.pagePool.length}/${workers} worker(s) ready`);
+      } catch (e) {
+        console.error(`[projects] + ${slug} launch workers fail: ${e.message}`);
+      }
+    })();
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1247,6 +1276,20 @@ app.delete('/api/projects/:slug', async (req, res) => {
     if (proj.jobs.size > 0 || proj.queue.length > 0) {
       return res.status(409).json({ error: `Project "${slug}" đang có ${proj.jobs.size} job + ${proj.queue.length} queue, stop trước rồi xoá` });
     }
+    // Đóng workers (pages) trước khi xoá folder/registry
+    proj.jobAbort = true;
+    for (const w of proj.pagePool) {
+      try { await w.page?.close(); } catch {}
+    }
+    proj.pagePool.length = 0;
+    // Đóng ctx riêng (chỉ khi profileDir riêng, không share). Cleanup ctxByProfile cache.
+    if (proj.profileDir && proj.ctx) {
+      try { await proj.ctx.close(); } catch {}
+      const profilePath = path.resolve(proj.profileDir);
+      ctxByProfile.delete(profilePath);
+    }
+    proj.ctx = null;
+
     // Xoá entry registry
     const reg = loadProjectsRegistry();
     reg.projects = (reg.projects || []).filter(p => p.slug !== slug);
@@ -1261,8 +1304,8 @@ app.delete('/api/projects/:slug', async (req, res) => {
       try { await fs.rm(proj.profileDir, { recursive: true, force: true }); console.log(`[projects] - ${slug}: xoá profile dir ${proj.profileDir}`); }
       catch (e) { console.warn(`[projects] - ${slug}: xoá profileDir fail: ${e.message}`); }
     }
-    console.log(`[projects] - ${slug} đã xoá. Workers cũ (nếu có) idle đến restart.`);
-    res.json({ ok: true, slug, restartRequired: proj.pagePool.length > 0 });
+    console.log(`[projects] - ${slug} đã xoá (workers + ctx + folder).`);
+    res.json({ ok: true, slug });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
