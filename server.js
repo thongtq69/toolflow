@@ -394,8 +394,12 @@ const initBrowser = async () => {
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let firstPageUsed = false;
   for (const proj of projects.values()) {
-    await launchProjectWorkers(proj, { reuseFirstPage: !firstPageUsed });
-    if (proj.pagePool.length > 0 && !proj.profileDir) firstPageUsed = true;
+    try {
+      await launchProjectWorkers(proj, { reuseFirstPage: !firstPageUsed });
+      if (proj.pagePool.length > 0 && !proj.profileDir) firstPageUsed = true;
+    } catch (e) {
+      console.error(`[init ${proj.slug}] launch fail: ${e.message} — skip, project sẽ tự launch khi acquireWorker`);
+    }
   }
   console.log(`[init] ✓ ${allWorkers().length} worker(s) ready across ${projects.size} project(s) trong ${ctxByProfile.size} browser ctx`);
 };
@@ -1042,8 +1046,12 @@ const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
 
 // Dispatcher: lấy frame từ queue, acquire worker, chạy. Trả về khi queue empty.
 const runDispatcher = async (proj) => {
-  if (proj.dispatching) return;
+  if (proj.dispatching) {
+    console.warn(`[dispatcher ${proj.slug}] đã đang chạy, skip — queue=${proj.queue.length} jobs=${proj.jobs.size}`);
+    return;
+  }
   proj.dispatching = true;
+  console.log(`[dispatcher ${proj.slug}] start — queue=${proj.queue.length} pagePool=${proj.pagePool.length}`);
   try {
     const cfg = await loadFrames(proj);
     while (proj.queue.length > 0 && !proj.jobAbort) {
@@ -1776,6 +1784,7 @@ app.post('/api/p/:slug/retry', wrapProjectHandler(handleRetry));
 const handleStop = (proj, req, res) => {
   proj.jobAbort = true;
   proj.queue.length = 0;
+  proj.dispatching = false; // cờ kẹt từ dispatcher cũ → reset để Gen lần sau chạy được
   for (const j of proj.jobs.values()) if (j.status === 'running') { j.status = 'failed'; j.lastError = 'stopped'; }
   broadcastJob(proj);
   console.log(`[job ${proj.slug}] ■ stop signal sent — queue cleared, abort sau frame đang chạy`);
@@ -1790,6 +1799,7 @@ const handleReset = async (proj, req, res) => {
   proj.jobs.clear();
   proj.queue.length = 0;
   proj.jobAbort = false;
+  proj.dispatching = false; // cờ kẹt → reset để dispatcher chạy lại được
   broadcastJob(proj);
   console.log(`[job ${proj.slug}] ⌫ reset state.json + jobs`);
   res.json({ ok: true });
