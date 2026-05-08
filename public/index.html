@@ -436,8 +436,8 @@ FRAME 01:</pre>
       <h4 class="font-semibold text-sm text-zinc-200 mb-2">Bước 1 — Cấu hình cơ bản</h4>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="text-xs text-zinc-400 block mb-1">Workers (1-4)</label>
-          <input id="wz-workers" type="number" min="1" max="4" value="1" class="input w-full">
+          <label class="text-xs text-zinc-400 block mb-1">Workers (1-10)</label>
+          <input id="wz-workers" type="number" min="1" max="10" value="1" class="input w-full">
           <p class="wizard-hint">Số worker browser chạy song song</p>
         </div>
         <div>
@@ -522,8 +522,8 @@ FRAME 01:</pre>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="text-xs text-zinc-400 block mb-1">Workers (1-4)</label>
-          <input id="st-workers" type="number" min="1" max="4" class="input w-full">
+          <label class="text-xs text-zinc-400 block mb-1">Workers (1-10)</label>
+          <input id="st-workers" type="number" min="1" max="10" class="input w-full">
         </div>
         <div>
           <label class="text-xs text-zinc-400 block mb-1">Type delay (ms/char)</label>
@@ -718,7 +718,7 @@ async function openNewProjectPrompt() {
   // Auto-extract UUID nếu user paste full URL
   const uuidMatch = rawProjectId.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   const projectId = uuidMatch ? uuidMatch[0] : rawProjectId.trim();
-  const workers = parseInt(prompt('Số workers (1-3):', '1'), 10) || 1;
+  const workers = parseInt(prompt('Số workers (1-10):', '1'), 10) || 1;
   const separateProfile = confirm(
     `Dùng Google account RIÊNG cho project "${name}"?\n\n` +
     `OK = Tạo profile dir riêng → lần đầu mở browser sẽ login fresh (account khác).\n` +

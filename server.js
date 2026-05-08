@@ -80,7 +80,7 @@ const makeProject = (meta) => {
     name: meta.name || slug,
     projectId,
     projectUrl: projectId ? `https://labs.google/fx/tools/flow/project/${projectId}` : 'https://labs.google/fx/tools/flow',
-    workersTarget: Math.max(1, Math.min(parseInt(meta.workers, 10) || 1, 4)),
+    workersTarget: Math.max(1, Math.min(parseInt(meta.workers, 10) || 1, 10)),
     profileDir, // null = share global; absolute path = browser context riêng
     framesPath: path.join(root, 'frames.json'),
     outputDir: path.join(root, 'output'),
@@ -1320,7 +1320,7 @@ app.post('/api/projects', async (req, res) => {
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!UUID_RE.test(projectId)) return res.status(400).json({ error: 'projectId phải là UUID (vd "ab883b63-982a-4df4-80ca-f9d6da04ec64") — paste từ URL Flow project' });
     const w = parseInt(workers, 10);
-    if (!Number.isFinite(w) || w < 1 || w > 4) return res.status(400).json({ error: 'workers phải là số 1-4' });
+    if (!Number.isFinite(w) || w < 1 || w > 10) return res.status(400).json({ error: 'workers phải là số 1-10' });
 
     // separateProfile: true → tạo profileDir riêng cho project, có Google account khác
     const profileDir = separateProfile ? `./profile-${slug}` : null;
