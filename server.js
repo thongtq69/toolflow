@@ -646,9 +646,11 @@ const ensureProjectRoot = async (page, proj) => {
   }
 };
 
-// Submit button luôn ở dưới cùng prompt bar, accessible name = "arrow_forward Create"
+// Submit button luôn ở dưới cùng prompt bar, accessible name = "arrow_forward <text>".
+// English: "arrow_forward Create" · Vietnamese: "arrow_forward Tạo".
+// Dùng regex match icon name 'arrow_forward' (Material Icons — universal).
 const findCreateButton = async (page) => {
-  const btn = page.getByRole('button', { name: 'arrow_forward Create' }).last();
+  const btn = page.getByRole('button', { name: /^arrow_forward\b/ }).last();
   await btn.waitFor({ state: 'visible', timeout: 10000 });
   return btn;
 };
