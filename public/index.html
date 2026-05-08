@@ -143,7 +143,8 @@
       <span id="frame-count" class="text-xs text-zinc-500"></span>
     </div>
     <ul id="frame-list" class="overflow-y-auto scroll-thin flex-1"></ul>
-    <div class="border-t border-zinc-800 p-2">
+    <div class="border-t border-zinc-800 p-2 space-y-1">
+      <button id="btn-bulk-import" class="btn btn-zinc w-full text-xs" title="Paste nhiều prompt cho nhiều frame cùng lúc">📋 Bulk import prompts</button>
       <button id="btn-add-frame" class="btn btn-purple w-full text-xs">+ New Frame</button>
     </div>
   </aside>
@@ -263,6 +264,41 @@
     <div class="flex gap-2 mt-5 justify-end">
       <button id="btn-cancel-add" class="btn btn-zinc">Cancel</button>
       <button id="btn-submit-add" class="btn btn-emerald">+ Tạo frame</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bulk import prompts modal -->
+<div id="bulk-import-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card p-5" style="max-width: 720px;">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-semibold">📋 Bulk import prompts</h3>
+      <button id="bulk-close" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </div>
+    <p class="text-xs text-zinc-400 mb-2">
+      Paste text có nhiều block frame. Bot tự parse + áp dụng vào override action của từng frame.
+      Format header được hỗ trợ:
+    </p>
+    <details class="bg-zinc-950 border border-zinc-800 rounded p-2 mb-3 text-[11px] text-zinc-500">
+      <summary class="cursor-pointer text-zinc-400">Các format header hợp lệ</summary>
+      <pre class="mono mt-2">▰▰▰ FRAME 01 — Title ▰▰▰
+### FRAME 01 — Title
+## F01 - Title
+--- Frame 1 ---
+=== FRAME 1: Title ===
+[FRAME 01]
+FRAME 01:</pre>
+      <p class="mt-1">Số 0X / X / 1-99 đều OK. Phần text giữa 2 header = action prompt cho frame đó.</p>
+    </details>
+    <textarea id="bulk-text" class="input mono w-full text-xs" rows="14" placeholder="Paste vào đây..."></textarea>
+    <div id="bulk-preview" class="mt-3 max-h-40 overflow-y-auto scroll-thin text-xs"></div>
+    <div class="flex gap-2 mt-3 justify-between items-center">
+      <span id="bulk-status" class="text-xs text-zinc-500"></span>
+      <div class="flex gap-2">
+        <button id="bulk-cancel" class="btn btn-zinc text-xs">Cancel</button>
+        <button id="bulk-parse" class="btn btn-amber text-xs">🔍 Preview</button>
+        <button id="bulk-apply" class="btn btn-emerald text-xs" disabled>💾 Apply override</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1291,6 +1327,96 @@ $('btn-clear-action').onclick = async () => {
     $('edit-action-form').style.display = 'none';
     fetchState();
   }
+};
+
+// ─── Bulk import prompts ───
+// Parse text có nhiều block frame, mỗi block bắt đầu bằng header line chứa "FRAME N" hoặc "F N".
+// Nhận format linh hoạt: ▰▰▰ FRAME 01 — Title ▰▰▰ · ### FRAME 01 · F01: · [FRAME 01] · vv
+function parseBulkPrompts(text) {
+  if (!text || !text.trim()) return [];
+  // Header regex: bắt đầu line + decoration tùy ý + FRAME/F + số + bất kỳ nội dung sau
+  // (?<num>\d+) capture số frame; (.*) capture phần title (optional)
+  const HEADER_RE = /^[\s\W_=▰─\-#*\[]*(?:FRAME|F(?=\s*\d))\s*0?(\d{1,3})\b[^\n]*$/gim;
+  const headers = [...text.matchAll(HEADER_RE)];
+  if (headers.length === 0) return [];
+  const result = [];
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    const num = parseInt(h[1], 10);
+    if (!Number.isFinite(num) || num < 1 || num > 999) continue;
+    const startBody = h.index + h[0].length;
+    const endBody = (i + 1 < headers.length) ? headers[i + 1].index : text.length;
+    let body = text.slice(startBody, endBody).trim();
+    // Strip trailing decoration line (vd ▰▰▰▰▰▰)
+    body = body.replace(/\n[\s\W_=▰─\-#*]+\s*$/, '').trim();
+    if (!body) continue;
+    const frame_id = `F${String(num).padStart(2, '0')}`;
+    const titleMatch = h[0].match(/[—–\-:]\s*([^▰─\-#*=\[\]\n]+?)(?:\s*[▰─=\-#*\[\]]+\s*)?$/);
+    const title = titleMatch ? titleMatch[1].trim() : null;
+    result.push({ frame_id, frame_num: num, title, prompt: body, header: h[0].trim() });
+  }
+  return result;
+}
+
+let bulkParsedItems = [];
+$('btn-bulk-import').onclick = () => {
+  $('bulk-text').value = '';
+  $('bulk-preview').innerHTML = '';
+  $('bulk-status').textContent = '';
+  $('bulk-apply').disabled = true;
+  bulkParsedItems = [];
+  $('bulk-import-modal').style.display = 'flex';
+  setTimeout(() => $('bulk-text').focus(), 50);
+};
+$('bulk-close').onclick = $('bulk-cancel').onclick = () => { $('bulk-import-modal').style.display = 'none'; };
+$('bulk-parse').onclick = () => {
+  const text = $('bulk-text').value;
+  bulkParsedItems = parseBulkPrompts(text);
+  const preview = $('bulk-preview');
+  preview.innerHTML = '';
+  if (bulkParsedItems.length === 0) {
+    preview.innerHTML = '<div class="text-red-400 text-xs">⚠ Không tìm thấy header FRAME nào. Kiểm tra format.</div>';
+    $('bulk-apply').disabled = true;
+    $('bulk-status').textContent = '';
+    return;
+  }
+  // Map frame existence (warn nếu frame_id không có trong project)
+  const existingIds = new Set((appState.frames || []).map(f => f.frame_id));
+  let validCount = 0;
+  bulkParsedItems.forEach(it => {
+    const exists = existingIds.has(it.frame_id);
+    if (exists) validCount++;
+    const row = document.createElement('div');
+    row.className = 'flex gap-2 items-start py-1 border-b border-zinc-800';
+    const titleHtml = it.title ? `<span class="text-zinc-400 text-[11px]">${escapeHtml(it.title)}</span>` : '';
+    const previewText = it.prompt.length > 120 ? it.prompt.slice(0, 120) + '...' : it.prompt;
+    row.innerHTML = `
+      <span class="${exists ? 'text-emerald-400' : 'text-red-400'} mono text-xs shrink-0 w-12">${exists ? '✓' : '✗'} ${it.frame_id}</span>
+      <div class="flex-1 min-w-0">
+        ${titleHtml}
+        <div class="text-zinc-500 text-[11px] truncate">${escapeHtml(previewText)}</div>
+      </div>
+      <span class="text-[10px] text-zinc-600 shrink-0">${it.prompt.length}ch</span>
+    `;
+    preview.appendChild(row);
+  });
+  $('bulk-status').textContent = `Detect ${bulkParsedItems.length} frames · ${validCount} match (✓), ${bulkParsedItems.length - validCount} không có trong project (✗)`;
+  $('bulk-apply').disabled = validCount === 0;
+};
+$('bulk-apply').onclick = async () => {
+  const existingIds = new Set((appState.frames || []).map(f => f.frame_id));
+  const valid = bulkParsedItems.filter(it => existingIds.has(it.frame_id));
+  if (valid.length === 0) { toast('Không có frame nào hợp lệ', 'error'); return; }
+  $('bulk-apply').disabled = true;
+  $('bulk-status').textContent = `Đang apply ${valid.length} override...`;
+  let ok = 0, fail = 0;
+  for (const it of valid) {
+    const r = await api('/api/override-prompt', { frame_id: it.frame_id, action: it.prompt });
+    if (r && !r.error) ok++; else fail++;
+  }
+  toast(`Đã apply ${ok}/${valid.length} override${fail > 0 ? ` (${fail} fail)` : ''}`, fail > 0 ? 'error' : 'success');
+  $('bulk-import-modal').style.display = 'none';
+  fetchState();
 };
 
 // ─── Add new frame ───
