@@ -706,16 +706,37 @@ async function startLoginFlow() {
 }
 
 async function onLoginDetected(slug) {
+  // Clear poll trước (tránh race condition text overwrite)
+  if (loginPollId) { clearInterval(loginPollId); loginPollId = null; }
   $('login-status-text').textContent = '✓ Detect cookies — đang nav workers về project...';
   try {
     const r = await fetch(`/api/projects/${encodeURIComponent(slug)}/login-complete`, { method: 'POST' }).then(r => r.json());
-    if (r.error) { toast(r.error, 'error'); return; }
+    if (r.error) {
+      // Cookie chưa set → restart poll
+      $('login-status-text').textContent = `❌ ${r.error}. Login chưa xong, đang đợi tiếp...`;
+      // Restart poll
+      let pollCount = 0;
+      loginPollId = setInterval(async () => {
+        pollCount++;
+        $('login-status-text').textContent = `Đang đợi login... (${pollCount * 2}s) — login Google account mới trên cửa sổ Chromium`;
+        try {
+          const st = await fetch(`/api/projects/${encodeURIComponent(slug)}/login-status`).then(r => r.json());
+          if (st.loggedIn) {
+            clearInterval(loginPollId); loginPollId = null;
+            await onLoginDetected(slug);
+          }
+        } catch {}
+      }, 2000);
+      toast(r.error, 'error');
+      return;
+    }
     $('login-step-2').style.display = 'none';
     $('login-step-3').style.display = '';
     $('login-success-text').textContent = r.message || 'Done';
     toast(`Đã login account mới cho ${slug}`, 'success');
     fetchState();
   } catch (e) {
+    $('login-status-text').textContent = `❌ Lỗi network: ${e.message}`;
     toast('Lỗi: ' + e.message, 'error');
   }
 }
