@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>VideoFlow — Frame Bank</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace; }
+  .scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+  .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+  /* status badges */
+  .badge { padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .badge-pending { background: #27272a; color: #a1a1aa; }
+  .badge-running { background: #422006; color: #fbbf24; animation: pulse 1.2s ease-in-out infinite; }
+  .badge-waiting_pick { background: #1e3a8a; color: #93c5fd; }
+  .badge-picked { background: #052e1a; color: #6ee7b7; }
+  .badge-failed { background: #450a0a; color: #fca5a5; }
+  .badge-done { background: #052e1a; color: #6ee7b7; }
+  .badge-edited { background: #3b0764; color: #d8b4fe; }
+  .badge-custom { background: #134e4a; color: #5eead4; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.6 } }
+  .frame-card { transition: background 0.15s; }
+  .frame-card:hover { background: #27272a; }
+  .frame-card.active { background: #1e3a8a40; border-left: 3px solid #60a5fa; }
+  .frame-card.viewing { background: #14532d30; border-left: 3px solid #4ade80; }
+  .variant-card { transition: transform 0.15s, box-shadow 0.15s; }
+  .variant-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px -4px rgba(0,0,0,0.5); }
+  .log-line { line-height: 1.45; padding: 1px 0; word-break: break-word; white-space: pre-wrap; }
+  .log-info { color: #d4d4d8; }
+  .log-warn { color: #fbbf24; }
+  .log-error { color: #fca5a5; }
+  .log-ts { color: #71717a; }
+  .btn { padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; transition: background 0.12s; cursor: pointer; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: #2563eb; color: white; }
+  .btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+  .btn-emerald { background: #059669; color: white; }
+  .btn-emerald:hover:not(:disabled) { background: #047857; }
+  .btn-amber { background: #d97706; color: white; }
+  .btn-amber:hover:not(:disabled) { background: #b45309; }
+  .btn-zinc { background: #3f3f46; color: #e4e4e7; }
+  .btn-zinc:hover:not(:disabled) { background: #52525b; }
+  .btn-red { background: #b91c1c; color: white; }
+  .btn-red:hover:not(:disabled) { background: #991b1b; }
+  .btn-purple { background: #7c3aed; color: white; }
+  .btn-purple:hover:not(:disabled) { background: #6d28d9; }
+  /* modal */
+  .modal-backdrop { background: rgba(0,0,0,0.7); position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; }
+  .modal-card { background: #18181b; border: 1px solid #3f3f46; border-radius: 8px; max-width: 560px; width: 90%; max-height: 90vh; overflow-y: auto; }
+  .input { background: #09090b; border: 1px solid #3f3f46; border-radius: 6px; padding: 6px 10px; color: #e4e4e7; font-size: 13px; outline: none; }
+  .input:focus { border-color: #60a5fa; }
+  /* toast */
+  #toast-container { position: fixed; bottom: 16px; right: 16px; z-index: 100; display: flex; flex-direction: column; gap: 6px; }
+  .toast { background: #18181b; border: 1px solid #3f3f46; padding: 8px 14px; border-radius: 6px; font-size: 13px; color: #e4e4e7; box-shadow: 0 4px 12px rgba(0,0,0,0.5); animation: slideIn 0.2s ease-out; min-width: 200px; max-width: 320px; }
+  .toast-error { border-color: #b91c1c; color: #fca5a5; }
+  .toast-success { border-color: #059669; color: #6ee7b7; }
+  @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  .toast.fade-out { transition: opacity 0.4s; opacity: 0; }
+  .delete-x { color: #71717a; font-size: 14px; padding: 0 4px; cursor: pointer; }
+  .delete-x:hover { color: #fca5a5; }
+  /* wizard modal — must be above existing modals (z-50) and toasts (z-100) */
+  .modal-wizard-backdrop { background: rgba(0,0,0,0.85); position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; }
+  .modal-wizard-card { background: #18181b; border: 1px solid #3f3f46; border-radius: 10px; max-width: 640px; width: 92%; max-height: 92vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+  /* stepper */
+  .stepper { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 18px; }
+  .step-dot { width: 28px; height: 28px; border-radius: 999px; background: #27272a; color: #a1a1aa; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; border: 2px solid #3f3f46; }
+  .step-dot.step-active { background: #2563eb; color: white; border-color: #60a5fa; }
+  .step-dot.step-done { background: #059669; color: white; border-color: #10b981; }
+  .step-line { width: 40px; height: 2px; background: #3f3f46; }
+  .step-line.step-line-done { background: #10b981; }
+  .step-label { font-size: 11px; color: #71717a; text-align: center; margin-top: 4px; }
+  .check-icon { color: #10b981; font-size: 16px; }
+  .wizard-hint { font-size: 11px; color: #71717a; margin-top: 4px; }
+  .restart-warn { background: #422006; border: 1px solid #d97706; color: #fbbf24; padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 h-screen overflow-hidden flex flex-col">
+
+<!-- HEADER -->
+<header class="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <div class="text-emerald-400 text-lg font-bold">▶ VideoFlow</div>
+    <div class="text-xs text-zinc-500">Frame Bank</div>
+    <div id="job-badge" class="badge badge-pending">idle</div>
+    <div id="job-progress" class="text-xs text-zinc-400"></div>
+    <div id="job-count" class="text-xs text-zinc-500"></div>
+    <div id="worker-status" class="text-xs text-zinc-500 mono"></div>
+    <div id="job-error" class="text-xs text-red-400 mono max-w-md truncate"></div>
+  </div>
+  <div class="flex gap-2">
+    <button id="btn-start" class="btn btn-primary">▶ Start</button>
+    <button id="btn-batch" class="btn btn-purple" title="Chạy parallel batch trên nhiều worker">⚡ Batch</button>
+    <button id="btn-retry" class="btn btn-amber" disabled>↻ Retry</button>
+    <button id="btn-skip" class="btn btn-zinc" disabled>⏭ Skip</button>
+    <button id="btn-stop" class="btn btn-red" disabled>■ Stop</button>
+    <button id="btn-reset" class="btn btn-zinc">⌫ Reset</button>
+    <button id="btn-settings" class="btn btn-zinc" title="Cài đặt cấu hình runtime">⚙ Settings</button>
+  </div>
+</header>
+
+<!-- BODY: 3 columns -->
+<main class="flex-1 grid gap-2 p-2 overflow-hidden" style="grid-template-columns: 280px 1fr 380px;">
+
+  <!-- LEFT: frame timeline -->
+  <aside class="bg-zinc-900 rounded-lg overflow-hidden flex flex-col">
+    <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+      <h2 class="font-semibold text-sm text-zinc-300">Frames</h2>
+      <span id="frame-count" class="text-xs text-zinc-500"></span>
+    </div>
+    <ul id="frame-list" class="overflow-y-auto scroll-thin flex-1"></ul>
+    <div class="border-t border-zinc-800 p-2">
+      <button id="btn-add-frame" class="btn btn-purple w-full text-xs">+ New Frame</button>
+    </div>
+  </aside>
+
+  <!-- CENTER: current frame + variants -->
+  <section class="bg-zinc-900 rounded-lg overflow-hidden flex flex-col">
+    <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+      <div class="min-w-0 flex-1">
+        <h2 id="cur-title" class="font-semibold text-sm text-zinc-300">Chưa có frame nào active</h2>
+        <p id="cur-topic" class="text-xs text-zinc-500"></p>
+      </div>
+      <div class="flex items-center gap-2 text-xs text-zinc-500 shrink-0">
+        <span id="cur-refs"></span>
+      </div>
+    </div>
+    <div class="flex-1 overflow-y-auto scroll-thin p-3">
+      <details class="bg-zinc-950 rounded p-3 mb-3 mono text-xs text-zinc-400">
+        <summary class="cursor-pointer text-zinc-300">Prompt (click để xem)</summary>
+        <div id="cur-prompt" class="mt-2 whitespace-pre-wrap break-words"></div>
+      </details>
+
+      <!-- Edit action panel -->
+      <div id="edit-action-wrap" class="mb-3" style="display:none;">
+        <div class="flex items-center gap-2 mb-2">
+          <button id="btn-edit-action" class="btn btn-zinc text-xs">✏ Edit action</button>
+          <span id="edit-action-status" class="text-[11px] text-zinc-500"></span>
+        </div>
+        <div id="edit-action-form" style="display:none;" class="bg-zinc-950 rounded p-3 border border-zinc-800">
+          <label class="text-[11px] text-zinc-500 mb-1 block">Action prompt (chỉ override action, không động setting/style)</label>
+          <textarea id="edit-action-text" class="input mono w-full text-xs" rows="6" placeholder="Để trống và Save để xoá override"></textarea>
+          <div class="flex gap-2 mt-2">
+            <button id="btn-save-action" class="btn btn-emerald text-xs">💾 Save</button>
+            <button id="btn-clear-action" class="btn btn-red text-xs">✕ Clear override</button>
+            <button id="btn-cancel-action" class="btn btn-zinc text-xs">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Attempts dropdown -->
+      <div id="attempts-wrap" class="mb-3" style="display:none;">
+        <label class="text-[11px] text-zinc-500 mr-2">Attempt:</label>
+        <select id="attempts-select" class="input text-xs"></select>
+        <span id="attempts-meta" class="text-[11px] text-zinc-500 ml-2"></span>
+      </div>
+
+      <div id="variants-grid" class="grid grid-cols-2 gap-3"></div>
+      <div id="empty-state" class="text-center text-zinc-600 mt-12">
+        <div class="text-4xl mb-2">🎬</div>
+        <div class="text-sm">Click <b>Start</b> để bắt đầu gen frame đầu tiên, hoặc click frame để xem attempts.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: log console -->
+  <aside class="bg-black rounded-lg overflow-hidden flex flex-col border border-zinc-800">
+    <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+      <h2 class="font-semibold text-sm text-zinc-300">Live log</h2>
+      <div class="flex items-center gap-2">
+        <label class="text-xs text-zinc-500 flex items-center gap-1"><input type="checkbox" id="log-autoscroll" checked> autoscroll</label>
+        <button id="log-clear" class="text-xs text-zinc-500 hover:text-zinc-300">clear</button>
+      </div>
+    </div>
+    <div id="log-stream" class="flex-1 overflow-y-auto scroll-thin px-3 py-2 mono text-xs"></div>
+  </aside>
+
+</main>
+
+<!-- New Frame Modal -->
+<div id="new-frame-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-semibold">+ Thêm frame mới</h3>
+      <button id="btn-close-modal" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </div>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Frame ID <span class="text-red-400">*</span></label>
+        <input id="nf-id" type="text" class="input w-full" placeholder="F11 hoặc CUSTOM-X">
+      </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Topic (tóm tắt)</label>
+        <input id="nf-topic" type="text" class="input w-full" placeholder="VD: Cô gái đứng trước hồ bơi lúc hoàng hôn">
+      </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Default reference</label>
+        <select id="nf-ref" class="input w-full">
+          <option value="">— no ref —</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Action prompt <span class="text-red-400">*</span></label>
+        <textarea id="nf-action" class="input w-full mono text-xs" rows="6" placeholder="Mô tả action / chuyển động / ánh sáng..."></textarea>
+      </div>
+    </div>
+    <div class="flex gap-2 mt-5 justify-end">
+      <button id="btn-cancel-add" class="btn btn-zinc">Cancel</button>
+      <button id="btn-submit-add" class="btn btn-emerald">+ Tạo frame</button>
+    </div>
+  </div>
+</div>
+
+<!-- Setup Wizard Modal (first-run, blocks UI, no dismiss) -->
+<div id="wizard-modal" class="modal-wizard-backdrop" style="display:none;">
+  <div class="modal-wizard-card p-6">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-lg font-semibold text-emerald-400">🚀 Cài đặt VideoFlow lần đầu</h3>
+      <span class="text-xs text-zinc-500">Setup Wizard</span>
+    </div>
+    <p class="text-xs text-zinc-500 mb-4">Hoàn tất 3 bước để bắt đầu sử dụng. Modal này không thể đóng cho đến khi setup xong.</p>
+
+    <!-- Stepper -->
+    <div class="stepper">
+      <div class="flex flex-col items-center">
+        <div id="wz-dot-1" class="step-dot step-active">1</div>
+        <div class="step-label">Cấu hình</div>
+      </div>
+      <div id="wz-line-1" class="step-line"></div>
+      <div class="flex flex-col items-center">
+        <div id="wz-dot-2" class="step-dot">2</div>
+        <div class="step-label">Đăng nhập</div>
+      </div>
+      <div id="wz-line-2" class="step-line"></div>
+      <div class="flex flex-col items-center">
+        <div id="wz-dot-3" class="step-dot">3</div>
+        <div class="step-label">Project</div>
+      </div>
+    </div>
+
+    <!-- Step 1: Cấu hình cơ bản -->
+    <div id="wz-step-1" class="space-y-3">
+      <h4 class="font-semibold text-sm text-zinc-200 mb-2">Bước 1 — Cấu hình cơ bản</h4>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Workers (1-4)</label>
+          <input id="wz-workers" type="number" min="1" max="4" value="1" class="input w-full">
+          <p class="wizard-hint">Số worker browser chạy song song</p>
+        </div>
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Type delay (ms/char)</label>
+          <input id="wz-typedelay" type="number" min="0" value="80" class="input w-full">
+          <p class="wizard-hint">Độ trễ gõ phím để qua bot detection</p>
+        </div>
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Cooldown min (giây)</label>
+          <input id="wz-cooldown-min" type="number" min="0" value="20" class="input w-full">
+        </div>
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Cooldown max (giây)</label>
+          <input id="wz-cooldown-max" type="number" min="0" value="50" class="input w-full">
+        </div>
+      </div>
+      <div class="flex items-center gap-2 mt-2">
+        <input id="wz-headless" type="checkbox" class="w-4 h-4">
+        <label for="wz-headless" class="text-xs text-zinc-400">Headless mode (ẩn browser) — <span class="text-amber-400">khuyên KHÔNG bật để qua bot detection</span></label>
+      </div>
+      <div class="flex justify-end mt-5">
+        <button id="wz-btn-to-2" class="btn btn-primary">Tiếp →</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Đăng nhập Google Flow -->
+    <div id="wz-step-2" class="space-y-3" style="display:none;">
+      <h4 class="font-semibold text-sm text-zinc-200 mb-2">
+        Bước 2 — Đăng nhập Google Flow
+        <span id="wz-cookie-check" class="check-icon ml-1" style="display:none;">✓</span>
+      </h4>
+      <div class="bg-zinc-950 rounded p-4 border border-zinc-800">
+        <p class="text-sm text-zinc-300 mb-3">VideoFlow cần cookies từ Google Flow để chạy. Bấm nút bên dưới để mở browser và đăng nhập tài khoản Google của bạn.</p>
+        <button id="wz-btn-launch-browser" class="btn btn-primary w-full text-sm py-3">🔐 Mở browser & đăng nhập</button>
+        <p class="wizard-hint mt-3">Sau khi đăng nhập, bấm "Tôi đã login xong" để check cookies</p>
+        <div class="flex gap-2 mt-3">
+          <button id="wz-btn-check-login" class="btn btn-emerald flex-1">✓ Tôi đã login xong</button>
+        </div>
+        <div id="wz-poll-status" class="text-xs text-zinc-400 mt-3 text-center" style="display:none;"></div>
+      </div>
+      <div class="flex justify-between mt-5">
+        <button id="wz-btn-back-1" class="btn btn-zinc">← Quay lại</button>
+        <button id="wz-btn-to-3" class="btn btn-primary" disabled>Tiếp →</button>
+      </div>
+    </div>
+
+    <!-- Step 3: Project Flow + frames.json -->
+    <div id="wz-step-3" class="space-y-3" style="display:none;">
+      <h4 class="font-semibold text-sm text-zinc-200 mb-2">Bước 3 — Project Flow + frames.json</h4>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Project URL hoặc ID <span class="text-red-400">*</span></label>
+        <input id="wz-project-url" type="text" class="input w-full mono text-xs" placeholder="https://labs.google/fx/tools/flow/project/xxxxxxxx-xxxx-... hoặc UUID">
+        <p id="wz-project-hint" class="wizard-hint">Paste full URL hoặc raw UUID. Hệ thống sẽ tự extract.</p>
+      </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">frames.json</label>
+        <textarea id="wz-frames-json" class="input w-full mono text-xs" rows="8" placeholder='Dán JSON hoặc bấm "Dùng template mặc định"'></textarea>
+        <div class="flex items-center justify-between mt-2">
+          <button id="wz-btn-default-frames" class="btn btn-zinc text-xs">📋 Dùng template mặc định</button>
+          <span id="wz-frames-status" class="text-[11px] text-zinc-500"></span>
+        </div>
+      </div>
+      <div class="flex justify-between mt-5">
+        <button id="wz-btn-back-2" class="btn btn-zinc">← Quay lại</button>
+        <button id="wz-btn-finish" class="btn btn-emerald">🎬 Hoàn tất</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal (gear icon, accessible anytime) -->
+<div id="settings-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card p-5" style="max-width: 600px;">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-semibold">⚙ Cài đặt</h3>
+      <button id="btn-close-settings" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </div>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Project URL hoặc ID</label>
+        <input id="st-project-url" type="text" class="input w-full mono text-xs" placeholder="https://labs.google/fx/... hoặc UUID">
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Workers (1-4)</label>
+          <input id="st-workers" type="number" min="1" max="4" class="input w-full">
+        </div>
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Type delay (ms/char)</label>
+          <input id="st-typedelay" type="number" min="0" class="input w-full">
+        </div>
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Cooldown min (giây)</label>
+          <input id="st-cooldown-min" type="number" min="0" class="input w-full">
+        </div>
+        <div>
+          <label class="text-xs text-zinc-400 block mb-1">Cooldown max (giây)</label>
+          <input id="st-cooldown-max" type="number" min="0" class="input w-full">
+        </div>
+      </div>
+      <div class="flex items-center gap-2 mt-2">
+        <input id="st-headless" type="checkbox" class="w-4 h-4">
+        <label for="st-headless" class="text-xs text-zinc-400">Headless mode (ẩn browser)</label>
+      </div>
+      <div id="st-restart-warn" class="restart-warn" style="display:none;">
+        ⚠ Workers/Port/Dirs đã đổi — cần restart server (Ctrl+C + npm start)
+      </div>
+    </div>
+    <div class="flex gap-2 mt-5 justify-end">
+      <button id="btn-cancel-settings" class="btn btn-zinc">Cancel</button>
+      <button id="btn-save-settings" class="btn btn-emerald">💾 Lưu cài đặt</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (d) => new Date(d).toLocaleTimeString('vi-VN', { hour12: false });
+
+let appState = { frames: [], state: { picked: {} }, job: { status: 'idle' }, blocks: {}, overrides: {}, custom_frames: [] };
+let viewState = { frameId: null, attemptId: 'current', frameData: null }; // null = follow active job
+
+// ─── Toast ───
+function toast(msg, type) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (type === 'error' ? ' toast-error' : type === 'success' ? ' toast-success' : '');
+  t.textContent = msg;
+  $('toast-container').appendChild(t);
+  setTimeout(() => { t.classList.add('fade-out'); setTimeout(() => t.remove(), 400); }, 3000);
+}
+
+// ─── SSE log + job updates ───
+function connectSSE() {
+  const evt = new EventSource('/api/logs');
+  evt.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'log') appendLog(m.entry);
+    else if (m.type === 'job') {
+      appState.job = m.job;
+      renderJobStatus();
+      renderFrameList();
+      // If user not viewing a different frame, follow the job
+      if (viewState.frameId === null || viewState.frameId === m.job?.frameId) {
+        renderCenter();
+      }
+    }
+  };
+  evt.onerror = () => { console.warn('SSE disconnect, retry in 2s'); setTimeout(connectSSE, 2000); };
+}
+
+function appendLog(entry) {
+  const stream = $('log-stream');
+  const div = document.createElement('div');
+  div.className = 'log-line log-' + entry.level;
+  div.innerHTML = `<span class="log-ts">${fmt(entry.ts)}</span> ${escapeHtml(entry.text)}`;
+  stream.appendChild(div);
+  while (stream.children.length > 600) stream.removeChild(stream.firstChild);
+  if ($('log-autoscroll').checked) stream.scrollTop = stream.scrollHeight;
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+$('log-clear').onclick = () => { $('log-stream').innerHTML = ''; };
+
+// ─── Multi-job helpers ───
+function getJobs() {
+  if (Array.isArray(appState.jobs)) return appState.jobs;
+  if (appState.job) return [appState.job];
+  return [];
+}
+function getActiveJobs() {
+  return getJobs().filter(j => j && (j.status === 'running' || j.status === 'waiting_pick'));
+}
+
+// ─── State fetch + render ───
+async function fetchState() {
+  try {
+    const r = await fetch('/api/state').then(r => r.json());
+    if (r.error) return;
+    appState = r;
+    if (!appState.overrides) appState.overrides = {};
+    if (!appState.custom_frames) appState.custom_frames = [];
+    renderJobStatus();
+    renderFrameList();
+    // If viewing a specific frame, refresh its data; else follow active job
+    if (viewState.frameId) {
+      // light refresh: re-render center using cached frameData; the user may want fresh, but avoid spam
+      renderCenter();
+    } else {
+      renderCenter();
+    }
+  } catch (e) { console.warn(e); }
+}
+
+function renderJobStatus() {
+  const j = appState.job || { status: 'idle' };
+  const badge = $('job-badge');
+  badge.className = 'badge badge-' + (j.status || 'pending');
+  badge.textContent = j.status || 'idle';
+
+  $('job-progress').textContent = j.frameIdx >= 0 && j.total
+    ? `${j.frameId || ''} • ${j.frameIdx + 1}/${j.total}` + (j.attempts ? ` • ${j.attempts} attempt${j.attempts > 1 ? 's' : ''}` : '')
+    : '';
+  $('job-error').textContent = j.lastError || '';
+
+  // Multi-job count display
+  const active = getActiveJobs();
+  const total = getJobs().length;
+  if (total > 1 || (Array.isArray(appState.jobs) && total > 0)) {
+    $('job-count').textContent = `${active.length} active / ${total} jobs`;
+  } else {
+    $('job-count').textContent = '';
+  }
+
+  // Worker status (parallel mode)
+  const workers = appState.workers || [];
+  if (workers.length > 1) {
+    const busy = workers.filter(w => w.busy).length;
+    $('worker-status').textContent = `🛠 ${busy}/${workers.length} workers busy`;
+  } else {
+    $('worker-status').textContent = '';
+  }
+
+  $('btn-start').disabled = j.status === 'running' || j.status === 'waiting_pick';
+  $('btn-start').textContent = (j.frameIdx >= 0 && j.status !== 'done') ? '▶ Resume' : '▶ Start';
+  $('btn-retry').disabled = !['failed', 'waiting_pick'].includes(j.status);
+  $('btn-skip').disabled = !['failed', 'waiting_pick'].includes(j.status);
+  $('btn-stop').disabled = !active.length && !(appState.queue_size > 0);
+  $('btn-batch').style.display = workers.length > 1 ? '' : 'none';
+}
+
+function isCustomFrame(f) {
+  return (appState.custom_frames || []).some(c => (typeof c === 'string' ? c : c.frame_id) === f.frame_id);
+}
+
+function hasOverride(frameId) {
+  return !!(appState.overrides && appState.overrides[frameId] && appState.overrides[frameId].action);
+}
+
+function renderFrameList() {
+  const ul = $('frame-list');
+  ul.innerHTML = '';
+  const frames = appState.frames || [];
+  $('frame-count').textContent = `${Object.keys(appState.state?.picked || {}).length} / ${frames.length} picked`;
+  frames.forEach((f, i) => {
+    const li = document.createElement('li');
+    const isActive = (appState.job?.frameId === f.frame_id) || getActiveJobs().some(j => j.frameId === f.frame_id);
+    const isViewing = viewState.frameId === f.frame_id;
+    li.className = 'frame-card px-3 py-2 cursor-pointer border-l-3 border-transparent ' +
+      (isActive ? 'active' : '') + ' ' + (isViewing && !isActive ? 'viewing' : '');
+    const status = f.status || 'pending';
+    const custom = isCustomFrame(f);
+    const edited = hasOverride(f.frame_id);
+    li.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span class="mono text-xs text-zinc-500 shrink-0">${String(i + 1).padStart(2, '0')}</span>
+          <span class="font-semibold text-sm">${escapeHtml(f.frame_id)}</span>
+          ${edited ? '<span class="badge badge-edited">✏ edited</span>' : ''}
+          ${custom ? '<span class="badge badge-custom">custom</span>' : ''}
+        </div>
+        <div class="flex items-center gap-1 shrink-0">
+          <span class="badge badge-${status}">${status}</span>
+          ${custom ? `<span class="delete-x" data-del="${escapeHtml(f.frame_id)}" title="Xoá frame">×</span>` : ''}
+        </div>
+      </div>
+      <div class="text-xs text-zinc-500 mt-0.5 truncate">${escapeHtml(f.topic || '')}</div>
+      ${f.default_reference ? `<div class="text-[10px] text-zinc-600 mt-0.5">↳ ref: ${escapeHtml(f.default_reference)}</div>` : ''}
+    `;
+    li.onclick = (e) => {
+      // delete button
+      if (e.target && e.target.classList.contains('delete-x')) {
+        e.stopPropagation();
+        deleteCustomFrame(e.target.getAttribute('data-del'));
+        return;
+      }
+      viewFrame(f.frame_id);
+    };
+    ul.appendChild(li);
+  });
+}
+
+// ─── View frame ───
+async function viewFrame(frameId) {
+  viewState.frameId = frameId;
+  viewState.attemptId = 'current';
+  viewState.frameData = null;
+  renderFrameList();
+  // show loading state in center
+  $('empty-state').style.display = 'none';
+  $('variants-grid').innerHTML = `<div class="col-span-2 text-center py-8 text-zinc-500"><div class="text-2xl mb-2 animate-pulse">⏳</div><div class="text-sm">Loading ${escapeHtml(frameId)}...</div></div>`;
+  try {
+    const r = await fetch(`/api/frame/${encodeURIComponent(frameId)}`).then(r => r.json());
+    viewState.frameData = r;
+    renderCenter();
+  } catch (e) {
+    toast('Lỗi load frame: ' + e.message, 'error');
+    renderCenter();
+  }
+}
+
+// ─── Center render ───
+function renderCenter() {
+  const j = appState.job || { status: 'idle' };
+  const focusFrameId = viewState.frameId || j.frameId;
+  const f = appState.frames?.find(x => x.frame_id === focusFrameId);
+
+  if (!f) {
+    $('cur-title').textContent = 'Chưa có frame nào active';
+    $('cur-topic').textContent = '';
+    $('cur-refs').textContent = '';
+    $('cur-prompt').textContent = '';
+    $('variants-grid').innerHTML = '';
+    $('empty-state').style.display = '';
+    $('edit-action-wrap').style.display = 'none';
+    $('attempts-wrap').style.display = 'none';
+    return;
+  }
+  $('empty-state').style.display = 'none';
+  $('edit-action-wrap').style.display = '';
+
+  const isViewMode = !!viewState.frameId && viewState.frameId !== j.frameId;
+  const edited = hasOverride(f.frame_id);
+  const overrideAction = edited ? appState.overrides[f.frame_id].action : null;
+  const effectiveAction = overrideAction || f.action || '';
+
+  $('cur-title').innerHTML = `${escapeHtml(f.frame_id)} <span class="text-zinc-500 text-xs">${escapeHtml(f.tag || '')}</span> ` +
+    (edited ? '<span class="badge badge-edited">✏ edited</span>' : '') +
+    (isCustomFrame(f) ? ' <span class="badge badge-custom">custom</span>' : '') +
+    (isViewMode ? ' <span class="badge badge-pending">view</span>' : '');
+  $('cur-topic').textContent = f.topic || '';
+  const refsCount = (f.default_reference ? 1 : 0) + (f.extra_anchor ? 1 : 0);
+  $('cur-refs').textContent = refsCount ? `refs: ${[f.default_reference, f.extra_anchor].filter(Boolean).join(', ')}` : 'no ref';
+
+  const fullPrompt = `${appState.blocks?.setting || ''}\n\n${appState.blocks?.style || ''}\n\n${effectiveAction}`;
+  $('cur-prompt').textContent = fullPrompt;
+
+  // Edit action status
+  $('edit-action-status').textContent = edited ? '(đang dùng override)' : '(default)';
+
+  // ===== VIEW MODE =====
+  if (isViewMode) {
+    renderViewMode(f);
+    return;
+  }
+
+  // ===== ACTIVE JOB MODE (current frame is the job's frame) =====
+  $('attempts-wrap').style.display = 'none';
+  const grid = $('variants-grid');
+  grid.innerHTML = '';
+  if (j.status === 'running') {
+    grid.innerHTML = `<div class="col-span-2 text-center py-12 text-zinc-500">
+      <div class="text-3xl mb-2 animate-pulse">⏳</div>
+      <div class="text-sm">Đang gen ${escapeHtml(f.frame_id)}... (~30-90s, có thể retry)</div>
+    </div>`;
+    return;
+  }
+  if (j.status === 'failed') {
+    grid.innerHTML = `<div class="col-span-2 text-center py-8 text-red-400">
+      <div class="text-3xl mb-2">⚠️</div>
+      <div class="text-sm font-semibold">${escapeHtml(f.frame_id)} failed</div>
+      <div class="text-xs mono text-red-300 mt-2 max-w-xl mx-auto">${escapeHtml(j.lastError || '')}</div>
+      <div class="text-xs text-zinc-500 mt-3">Click <b>↻ Retry</b> để thử lại, hoặc <b>⏭ Skip</b> để bỏ qua frame này.</div>
+    </div>`;
+    return;
+  }
+  const variants = j.lastVariants || [];
+  if (variants.length === 0) {
+    grid.innerHTML = `<div class="col-span-2 text-center py-12 text-zinc-500"><div class="text-sm">Chưa có variants. Bấm Start hoặc click frame để xem attempt cũ.</div></div>`;
+    return;
+  }
+  variants.forEach((v, idx) => {
+    const card = document.createElement('div');
+    card.className = 'variant-card bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800';
+    card.innerHTML = `
+      <div class="aspect-[9/16] bg-black overflow-hidden">
+        <img src="/output/${encodeURIComponent(f.frame_id)}/v${idx + 1}.png?t=${Date.now()}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.opacity=0.3">
+      </div>
+      <div class="p-2 flex items-center justify-between">
+        <div class="text-xs">
+          <div class="font-semibold">v${idx + 1}</div>
+          <div class="text-zinc-500 mono text-[10px]">seed: ${escapeHtml(v.seed || '?')}</div>
+        </div>
+        <button class="btn btn-emerald text-xs" onclick="pickVariant('${escapeHtml(f.frame_id)}', ${idx})" ${j.status === 'waiting_pick' ? '' : 'disabled'}>✓ Pick</button>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function renderViewMode(f) {
+  const data = viewState.frameData;
+  const grid = $('variants-grid');
+  if (!data) {
+    grid.innerHTML = `<div class="col-span-2 text-center py-8 text-zinc-500"><div class="text-sm">Loading...</div></div>`;
+    $('attempts-wrap').style.display = 'none';
+    return;
+  }
+  const hasCurrent = !!(data.current && data.current.variants && data.current.variants.length);
+  const attempts = Array.isArray(data.attempts) ? data.attempts.slice() : [];
+  // sort newest first
+  attempts.sort((a, b) => {
+    const ta = new Date(a.generatedAt || 0).getTime();
+    const tb = new Date(b.generatedAt || 0).getTime();
+    return tb - ta;
+  });
+
+  // Build dropdown
+  const sel = $('attempts-select');
+  sel.innerHTML = '';
+  if (hasCurrent) {
+    const opt = document.createElement('option');
+    opt.value = 'current';
+    const cAttempts = data.current.attempts || attempts.length + 1;
+    opt.textContent = `Current (attempt ${cAttempts})`;
+    sel.appendChild(opt);
+  }
+  attempts.forEach(a => {
+    const opt = document.createElement('option');
+    opt.value = a.attempt_id;
+    const ts = a.generatedAt ? new Date(a.generatedAt).toLocaleString('vi-VN', { hour12: false }) : a.attempt_id;
+    opt.textContent = `${a.attempt_id} — ${ts}`;
+    sel.appendChild(opt);
+  });
+  if (sel.options.length === 0) {
+    $('attempts-wrap').style.display = 'none';
+  } else {
+    $('attempts-wrap').style.display = '';
+  }
+  // pick current selection
+  if (viewState.attemptId === 'current' && !hasCurrent && attempts.length) {
+    viewState.attemptId = attempts[0].attempt_id;
+  }
+  if (viewState.attemptId !== 'current' && !attempts.find(a => a.attempt_id === viewState.attemptId)) {
+    viewState.attemptId = hasCurrent ? 'current' : (attempts[0]?.attempt_id || 'current');
+  }
+  sel.value = viewState.attemptId;
+  sel.onchange = () => { viewState.attemptId = sel.value; renderViewMode(f); };
+
+  // Pick the right meta
+  let meta = null;
+  let pathBase = '';
+  if (viewState.attemptId === 'current' && hasCurrent) {
+    meta = data.current;
+    pathBase = `/output/${encodeURIComponent(f.frame_id)}`;
+  } else {
+    meta = attempts.find(a => a.attempt_id === viewState.attemptId);
+    if (meta) pathBase = `/output/${encodeURIComponent(f.frame_id)}/attempts/${encodeURIComponent(meta.attempt_id)}`;
+  }
+
+  if (!meta) {
+    grid.innerHTML = '';
+    $('empty-state').style.display = '';
+    $('empty-state').innerHTML = `
+      <div class="text-4xl mb-2">🎬</div>
+      <div class="text-sm">Frame chưa gen — click <b>▶ Gen</b> on header để chạy</div>
+    `;
+    $('attempts-meta').textContent = '';
+    return;
+  }
+
+  $('empty-state').style.display = 'none';
+  $('attempts-meta').textContent = meta.generatedAt ? `gen at ${new Date(meta.generatedAt).toLocaleString('vi-VN', { hour12: false })}` : '';
+
+  // Render variants gallery
+  grid.innerHTML = '';
+  const variants = meta.variants || [];
+  if (variants.length === 0) {
+    grid.innerHTML = `<div class="col-span-2 text-center py-8 text-zinc-500"><div class="text-sm">Attempt này không có variant.</div></div>`;
+    return;
+  }
+  const j = appState.job || {};
+  const canPickActive = (j.status === 'waiting_pick' && j.frameId === f.frame_id && viewState.attemptId === 'current');
+
+  variants.forEach((v, idx) => {
+    const card = document.createElement('div');
+    card.className = 'variant-card bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800';
+    const imgUrl = `${pathBase}/v${idx + 1}.png?t=${Date.now()}`;
+    const isPicked = appState.state?.picked?.[f.frame_id]?.variant_idx === idx
+      && (viewState.attemptId === 'current'); // only mark picked on current
+    let btnHtml;
+    if (canPickActive) {
+      btnHtml = `<button class="btn btn-emerald text-xs" onclick="pickVariant('${escapeHtml(f.frame_id)}', ${idx})">✓ Pick</button>`;
+    } else {
+      btnHtml = `<button class="btn btn-amber text-xs" onclick="repickVariant('${escapeHtml(f.frame_id)}', '${escapeHtml(meta.attempt_id || 'current')}', ${idx})">⤴ Re-pick</button>`;
+    }
+    card.innerHTML = `
+      <div class="aspect-[9/16] bg-black overflow-hidden relative">
+        <img src="${imgUrl}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.opacity=0.3">
+        ${isPicked ? '<div class="absolute top-2 right-2 badge badge-picked">picked</div>' : ''}
+      </div>
+      <div class="p-2 flex items-center justify-between">
+        <div class="text-xs">
+          <div class="font-semibold">v${idx + 1}</div>
+          <div class="text-zinc-500 mono text-[10px]">seed: ${escapeHtml(v.seed || '?')}</div>
+        </div>
+        ${btnHtml}
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+// ─── Edit action ───
+$('btn-edit-action').onclick = () => {
+  const frameId = viewState.frameId || appState.job?.frameId;
+  const f = appState.frames?.find(x => x.frame_id === frameId);
+  if (!f) return;
+  const ov = appState.overrides?.[frameId];
+  $('edit-action-text').value = (ov && ov.action) || f.action || '';
+  $('edit-action-form').style.display = '';
+};
+$('btn-cancel-action').onclick = () => { $('edit-action-form').style.display = 'none'; };
+$('btn-save-action').onclick = async () => {
+  const frameId = viewState.frameId || appState.job?.frameId;
+  if (!frameId) return;
+  const text = $('edit-action-text').value.trim();
+  const body = { frame_id: frameId, action: text || null };
+  const r = await api('/api/override-prompt', body);
+  if (r && !r.error) {
+    toast(text ? 'Đã lưu override' : 'Đã xoá override', 'success');
+    $('edit-action-form').style.display = 'none';
+    fetchState();
+  }
+};
+$('btn-clear-action').onclick = async () => {
+  const frameId = viewState.frameId || appState.job?.frameId;
+  if (!frameId) return;
+  if (!confirm(`Xoá override cho ${frameId}?`)) return;
+  const r = await api('/api/override-prompt', { frame_id: frameId, action: null });
+  if (r && !r.error) {
+    toast('Đã xoá override', 'success');
+    $('edit-action-form').style.display = 'none';
+    fetchState();
+  }
+};
+
+// ─── Add new frame ───
+$('btn-add-frame').onclick = () => {
+  $('nf-id').value = '';
+  $('nf-topic').value = '';
+  $('nf-action').value = '';
+  // populate ref dropdown
+  const sel = $('nf-ref');
+  sel.innerHTML = '<option value="">— no ref —</option>';
+  (appState.frames || []).forEach(f => {
+    const o = document.createElement('option');
+    o.value = f.frame_id;
+    o.textContent = f.frame_id + (f.topic ? ' — ' + f.topic.slice(0, 40) : '');
+    sel.appendChild(o);
+  });
+  $('new-frame-modal').style.display = 'flex';
+  setTimeout(() => $('nf-id').focus(), 50);
+};
+$('btn-close-modal').onclick = () => { $('new-frame-modal').style.display = 'none'; };
+$('btn-cancel-add').onclick = () => { $('new-frame-modal').style.display = 'none'; };
+$('btn-submit-add').onclick = async () => {
+  const frame_id = $('nf-id').value.trim();
+  const topic = $('nf-topic').value.trim();
+  const action = $('nf-action').value.trim();
+  const default_reference = $('nf-ref').value || null;
+  if (!frame_id) { toast('Frame ID không được rỗng', 'error'); return; }
+  if (!action) { toast('Action prompt không được rỗng', 'error'); return; }
+  const r = await api('/api/add-frame', { frame_id, topic, action, default_reference });
+  if (r && !r.error) {
+    toast(`Đã tạo ${frame_id}`, 'success');
+    $('new-frame-modal').style.display = 'none';
+    fetchState();
+  }
+};
+
+async function deleteCustomFrame(frameId) {
+  if (!confirm(`Xoá custom frame ${frameId}? Hành động này không thể undo.`)) return;
+  try {
+    const r = await fetch(`/api/custom-frame/${encodeURIComponent(frameId)}`, { method: 'DELETE' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(j.error || `HTTP ${r.status}`, 'error');
+      return;
+    }
+    toast(`Đã xoá ${frameId}`, 'success');
+    if (viewState.frameId === frameId) {
+      viewState.frameId = null;
+      viewState.frameData = null;
+    }
+    fetchState();
+  } catch (e) {
+    toast('Lỗi xoá: ' + e.message, 'error');
+  }
+}
+
+// ─── Actions ───
+async function api(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(j.error || `HTTP ${r.status}`, 'error');
+      return { error: j.error || `HTTP ${r.status}` };
+    }
+    return j;
+  } catch (e) {
+    toast('Network: ' + e.message, 'error');
+    return { error: e.message };
+  }
+}
+
+$('btn-start').onclick = () => api('/api/start');
+$('btn-retry').onclick = () => api('/api/retry');
+$('btn-skip').onclick = () => api('/api/skip');
+$('btn-stop').onclick = () => api('/api/stop');
+$('btn-batch').onclick = async () => {
+  const frames = appState.frames || [];
+  // Lọc frame chưa picked + chưa custom-only-action
+  const candidates = frames.filter(f => !f.picked).map(f => f.frame_id);
+  if (candidates.length === 0) { toast('Không có frame nào chưa pick', 'error'); return; }
+  const input = prompt(`Batch parallel ${appState.workers?.length || 1} workers.\nNhập frame_ids cách nhau dấu phẩy (mặc định: tất cả unfilled):\n\nUnfilled: ${candidates.join(', ')}`, candidates.join(','));
+  if (!input) return;
+  const frame_ids = input.split(',').map(s => s.trim()).filter(Boolean);
+  const r = await api('/api/batch-start', { frame_ids });
+  if (r && !r.error) toast(`Batch ${frame_ids.length} frames trên ${r.workers} workers`, 'success');
+};
+$('btn-reset').onclick = async () => {
+  if (!confirm('Reset state.json + job state? Các frame đã picked sẽ mất tham chiếu.')) return;
+  await api('/api/reset');
+  fetchState();
+};
+
+window.pickVariant = async (frame_id, idx) => {
+  const r = await api('/api/pick', { frame_id, variant_idx: idx });
+  if (r && !r.error) toast(`Đã pick v${idx + 1} cho ${frame_id}`, 'success');
+};
+
+window.repickVariant = async (frame_id, attempt_id, idx) => {
+  const body = { frame_id, variant_idx: idx };
+  if (attempt_id && attempt_id !== 'current') body.attempt_id = attempt_id;
+  const r = await api('/api/repick', body);
+  if (r && !r.error) toast(`đã re-pick v${idx + 1}`, 'success');
+  // refresh frame data
+  if (viewState.frameId) viewFrame(viewState.frameId);
+};
+
+window.startFromFrame = async (idx) => {
+  if (appState.job?.status === 'running') { toast('Job đang chạy, dừng trước đã.', 'error'); return; }
+  if (!confirm(`Bắt đầu từ frame index ${idx} (${appState.frames[idx]?.frame_id})?`)) return;
+  await api('/api/start', { from_idx: idx, reset_state: idx === 0 });
+};
+
+// Close modal on backdrop click
+$('new-frame-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'new-frame-modal') $('new-frame-modal').style.display = 'none';
+});
+
+// ─── Setup Wizard + Settings Modal ───
+const UUID_RE = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i;
+const DEFAULT_FRAMES_TEMPLATE = {
+  project: { name: "My Resort Tour" },
+  blocks: { setting: "<EDIT>", style: "<EDIT>" },
+  frames: []
+};
+
+let wizardState = { step: 1, hasCookies: false, pollTimer: null, pollAttempts: 0 };
+
+function extractProjectId(input) {
+  if (!input) return null;
+  const m = String(input).match(UUID_RE);
+  return m ? m[0] : null;
+}
+
+function setWizardStep(n) {
+  wizardState.step = n;
+  for (let i = 1; i <= 3; i++) {
+    const dot = $('wz-dot-' + i);
+    if (!dot) continue;
+    dot.classList.remove('step-active', 'step-done');
+    if (i < n) dot.classList.add('step-done');
+    else if (i === n) dot.classList.add('step-active');
+    if (i < n) dot.textContent = '✓';
+    else dot.textContent = String(i);
+  }
+  for (let i = 1; i <= 2; i++) {
+    const line = $('wz-line-' + i);
+    if (!line) continue;
+    line.classList.toggle('step-line-done', i < n);
+  }
+  for (let i = 1; i <= 3; i++) {
+    const panel = $('wz-step-' + i);
+    if (panel) panel.style.display = (i === n ? '' : 'none');
+  }
+}
+
+async function fetchSetupStatus() {
+  try {
+    const r = await fetch('/api/setup/status').then(r => r.json());
+    return r;
+  } catch (e) {
+    console.warn('setup/status failed', e);
+    return null;
+  }
+}
+
+async function maybeShowWizard() {
+  const status = await fetchSetupStatus();
+  if (!status) return;
+  if (status.setupComplete) {
+    $('wizard-modal').style.display = 'none';
+    return;
+  }
+  // Reflect existing cookie state when re-opening
+  wizardState.hasCookies = !!status.hasCookies;
+  $('wz-cookie-check').style.display = wizardState.hasCookies ? '' : 'none';
+  $('wz-btn-to-3').disabled = !wizardState.hasCookies;
+  $('wizard-modal').style.display = 'flex';
+  setWizardStep(1);
+}
+
+// Step 1 → 2
+$('wz-btn-to-2').onclick = () => {
+  const wmin = parseInt($('wz-cooldown-min').value, 10);
+  const wmax = parseInt($('wz-cooldown-max').value, 10);
+  if (isFinite(wmin) && isFinite(wmax) && wmin > wmax) {
+    toast('Cooldown min phải ≤ max', 'error');
+    return;
+  }
+  setWizardStep(2);
+};
+$('wz-btn-back-1').onclick = () => { stopCookiePoll(); setWizardStep(1); };
+$('wz-btn-back-2').onclick = () => setWizardStep(2);
+
+// Step 2: launch browser + poll cookies
+$('wz-btn-launch-browser').onclick = async () => {
+  $('wz-btn-launch-browser').disabled = true;
+  $('wz-btn-launch-browser').textContent = '⏳ Đang mở browser...';
+  const r = await api('/api/setup/launch-browser', {});
+  $('wz-btn-launch-browser').disabled = false;
+  $('wz-btn-launch-browser').textContent = '🔐 Mở browser & đăng nhập';
+  if (r && !r.error) {
+    toast('Đã mở browser — vui lòng login', 'success');
+  }
+};
+
+function stopCookiePoll() {
+  if (wizardState.pollTimer) {
+    clearInterval(wizardState.pollTimer);
+    wizardState.pollTimer = null;
+  }
+  wizardState.pollAttempts = 0;
+  $('wz-poll-status').style.display = 'none';
+}
+
+$('wz-btn-check-login').onclick = () => {
+  if (wizardState.pollTimer) return; // already polling
+  wizardState.pollAttempts = 0;
+  $('wz-poll-status').style.display = '';
+  $('wz-poll-status').textContent = '⏳ Đang check cookies... (0/30)';
+  $('wz-btn-check-login').disabled = true;
+  wizardState.pollTimer = setInterval(async () => {
+    wizardState.pollAttempts++;
+    const status = await fetchSetupStatus();
+    if (status && status.hasCookies) {
+      stopCookiePoll();
+      wizardState.hasCookies = true;
+      $('wz-cookie-check').style.display = '';
+      $('wz-btn-to-3').disabled = false;
+      $('wz-btn-check-login').disabled = false;
+      $('wz-poll-status').style.display = '';
+      $('wz-poll-status').textContent = '✓ Đã có cookies — bấm "Tiếp" để qua bước 3';
+      $('wz-poll-status').className = 'text-xs text-emerald-400 mt-3 text-center';
+      toast('Đã có cookies!', 'success');
+      return;
+    }
+    $('wz-poll-status').textContent = `⏳ Đang check cookies... (${wizardState.pollAttempts}/30)`;
+    if (wizardState.pollAttempts >= 30) {
+      stopCookiePoll();
+      $('wz-btn-check-login').disabled = false;
+      $('wz-poll-status').style.display = '';
+      $('wz-poll-status').textContent = '✗ Timeout 60s — chưa thấy cookies. Hãy login rồi thử lại.';
+      $('wz-poll-status').className = 'text-xs text-red-400 mt-3 text-center';
+      toast('Timeout — login chưa xong', 'error');
+    }
+  }, 2000);
+};
+
+$('wz-btn-to-3').onclick = () => {
+  if (!wizardState.hasCookies) { toast('Cần login xong trước đã', 'error'); return; }
+  stopCookiePoll();
+  setWizardStep(3);
+};
+
+// Step 3: default template + finish
+$('wz-btn-default-frames').onclick = () => {
+  $('wz-frames-json').value = JSON.stringify(DEFAULT_FRAMES_TEMPLATE, null, 2);
+  $('wz-frames-status').textContent = 'Đã load template — chỉnh sửa rồi bấm Hoàn tất';
+};
+
+$('wz-btn-finish').onclick = async () => {
+  const projectInput = $('wz-project-url').value.trim();
+  const projectId = extractProjectId(projectInput);
+  if (!projectInput) { toast('Cần Project URL hoặc ID', 'error'); return; }
+  if (!projectId) { toast('Không tìm thấy UUID hợp lệ trong input', 'error'); return; }
+
+  const framesText = $('wz-frames-json').value.trim();
+  let framesObj;
+  if (framesText) {
+    try { framesObj = JSON.parse(framesText); }
+    catch (e) { toast('frames.json không phải JSON hợp lệ: ' + e.message, 'error'); return; }
+  } else {
+    framesObj = DEFAULT_FRAMES_TEMPLATE;
+  }
+  if (!framesObj || typeof framesObj !== 'object' || !framesObj.project || !framesObj.blocks) {
+    toast('frames.json thiếu project/blocks', 'error');
+    return;
+  }
+
+  $('wz-btn-finish').disabled = true;
+  $('wz-btn-finish').textContent = '⏳ Đang lưu...';
+
+  // 1) PUT /api/config
+  const cfgBody = {
+    projectUrl: projectInput,
+    workers: parseInt($('wz-workers').value, 10) || 1,
+    cooldownMin: parseInt($('wz-cooldown-min').value, 10) || 20,
+    cooldownMax: parseInt($('wz-cooldown-max').value, 10) || 50,
+    typeDelayMs: parseInt($('wz-typedelay').value, 10) || 80,
+    headless: $('wz-headless').checked,
+  };
+  const cfgRes = await fetch('/api/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfgBody),
+  }).then(async r => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: j.error || `HTTP ${r.status}` };
+    return j;
+  }).catch(e => ({ error: e.message }));
+
+  if (cfgRes.error) {
+    toast('Lỗi lưu config: ' + cfgRes.error, 'error');
+    $('wz-btn-finish').disabled = false;
+    $('wz-btn-finish').textContent = '🎬 Hoàn tất';
+    return;
+  }
+
+  // 2) POST /api/setup/save-frames
+  const framesRes = await api('/api/setup/save-frames', { frames: framesObj });
+  if (framesRes && framesRes.error) {
+    toast('Lỗi lưu frames: ' + framesRes.error, 'error');
+    $('wz-btn-finish').disabled = false;
+    $('wz-btn-finish').textContent = '🎬 Hoàn tất';
+    return;
+  }
+
+  toast(`Setup xong! ${framesRes && framesRes.framesCount != null ? framesRes.framesCount + ' frames' : ''}`, 'success');
+  setTimeout(() => location.reload(), 600);
+};
+
+// ─── Settings Modal ───
+async function openSettingsModal() {
+  $('btn-save-settings').disabled = true;
+  $('st-restart-warn').style.display = 'none';
+  try {
+    const r = await fetch('/api/config').then(r => r.json());
+    const rt = (r && r.runtime) || {};
+    $('st-project-url').value = rt.projectUrl || rt.projectId || '';
+    $('st-workers').value = rt.workers != null ? rt.workers : 1;
+    $('st-typedelay').value = rt.typeDelayMs != null ? rt.typeDelayMs : 80;
+    $('st-cooldown-min').value = rt.cooldownMin != null ? rt.cooldownMin : 20;
+    $('st-cooldown-max').value = rt.cooldownMax != null ? rt.cooldownMax : 50;
+    $('st-headless').checked = !!rt.headless;
+    $('btn-save-settings').disabled = false;
+    $('settings-modal').style.display = 'flex';
+  } catch (e) {
+    toast('Không load được config: ' + e.message, 'error');
+  }
+}
+
+$('btn-settings').onclick = openSettingsModal;
+$('btn-close-settings').onclick = () => { $('settings-modal').style.display = 'none'; };
+$('btn-cancel-settings').onclick = () => { $('settings-modal').style.display = 'none'; };
+$('settings-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'settings-modal') $('settings-modal').style.display = 'none';
+});
+
+$('btn-save-settings').onclick = async () => {
+  const wmin = parseInt($('st-cooldown-min').value, 10);
+  const wmax = parseInt($('st-cooldown-max').value, 10);
+  if (isFinite(wmin) && isFinite(wmax) && wmin > wmax) {
+    toast('Cooldown min phải ≤ max', 'error');
+    return;
+  }
+  const projectInput = $('st-project-url').value.trim();
+  const body = {
+    workers: parseInt($('st-workers').value, 10) || 1,
+    cooldownMin: wmin || 20,
+    cooldownMax: wmax || 50,
+    typeDelayMs: parseInt($('st-typedelay').value, 10) || 80,
+    headless: $('st-headless').checked,
+  };
+  if (projectInput) body.projectUrl = projectInput;
+
+  $('btn-save-settings').disabled = true;
+  $('btn-save-settings').textContent = '⏳ Đang lưu...';
+  try {
+    const res = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(j.error || `HTTP ${res.status}`, 'error');
+    } else {
+      toast('Đã lưu cài đặt', 'success');
+      if (j.restartRequired) {
+        $('st-restart-warn').style.display = '';
+        toast('Workers/Port/Dirs đã đổi — cần restart server (Ctrl+C + npm start)', 'error');
+      } else {
+        $('settings-modal').style.display = 'none';
+      }
+    }
+  } catch (e) {
+    toast('Network: ' + e.message, 'error');
+  } finally {
+    $('btn-save-settings').disabled = false;
+    $('btn-save-settings').textContent = '💾 Lưu cài đặt';
+  }
+};
+
+// ─── Init ───
+connectSSE();
+fetchState();
+setInterval(fetchState, 4000);
+maybeShowWizard();
+</script>
+</body>
+</html>

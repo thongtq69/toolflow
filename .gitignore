@@ -1,0 +1,12 @@
+node_modules/
+profile/
+output/
+config.json
+frames.json
+.playwright-mcp/
+*.log
+.DS_Store
+.env
+.env.local
+*.png
+!public/**/*.png
