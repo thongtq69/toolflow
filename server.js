@@ -68,12 +68,16 @@ const makeProject = (meta) => {
   const slug = meta.slug;
   const root = resolveDir(`./projects/${slug}`);
   const projectId = meta.projectId || '';
+  // profileDir: nếu có → tách Google account riêng. Nếu null/empty → share PROFILE_DIR global.
+  // Path tương đối resolve về repo root (vd: 'profile-cafe' → /repo/profile-cafe).
+  const profileDir = meta.profileDir ? resolveDir(meta.profileDir) : null;
   return {
     slug,
     name: meta.name || slug,
     projectId,
     projectUrl: projectId ? `https://labs.google/fx/tools/flow/project/${projectId}` : 'https://labs.google/fx/tools/flow',
     workersTarget: Math.max(1, Math.min(parseInt(meta.workers, 10) || 1, 4)),
+    profileDir, // null = share global; absolute path = browser context riêng
     framesPath: path.join(root, 'frames.json'),
     outputDir: path.join(root, 'output'),
     statePath: path.join(root, 'output', 'state.json'),
@@ -84,7 +88,8 @@ const makeProject = (meta) => {
     jobAbort: false,
     dispatching: false,
     logBuffer: [],
-    pagePool: [], // [{ page, busy, id, settingsVerified, projectSlug }] — workers dedicated cho project này
+    pagePool: [], // [{ page, busy, id, settingsVerified, projectSlug }]
+    ctx: null,    // browser context riêng (chỉ set nếu profileDir != null), share global ctx ngược lại
   };
 };
 
@@ -306,17 +311,34 @@ const debugShot = async (label, page = null) => {
   }
 };
 
-const initBrowser = async () => {
-  const absProfile = path.resolve(USER_DATA_DIR);
-  const totalWorkers = [...projects.values()].reduce((s, p) => s + (p.workersTarget || 0), 0);
-  console.log(`[init] launching browser, profile=`, absProfile, ` projects=${projects.size}  total_workers=${totalWorkers}`);
-  ctx = await chromium.launchPersistentContext(absProfile, {
+// Map<absProfilePath, ctx> — share ctx giữa các project có cùng profileDir
+const ctxByProfile = new Map();
+
+const launchCtx = async (absProfile) => {
+  if (ctxByProfile.has(absProfile)) return ctxByProfile.get(absProfile);
+  console.log(`[init] launching ctx for profile: ${absProfile}`);
+  const c = await chromium.launchPersistentContext(absProfile, {
     headless: HEADLESS,
     viewport: { width: 1280, height: 900 },
     args: ['--disable-blink-features=AutomationControlled'],
   });
-  let isFirstPage = true;
+  ctxByProfile.set(absProfile, c);
+  return c;
+};
+
+const initBrowser = async () => {
+  const totalWorkers = [...projects.values()].reduce((s, p) => s + (p.workersTarget || 0), 0);
+  console.log(`[init] projects=${projects.size}  total_workers=${totalWorkers}`);
+
+  // Global ctx (cho project share account chung — không có profileDir riêng)
+  const sharedAbsProfile = path.resolve(USER_DATA_DIR);
+  const hasSharedProjects = [...projects.values()].some(p => !p.profileDir);
+  if (hasSharedProjects) {
+    ctx = await launchCtx(sharedAbsProfile);
+  }
+
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let firstPageUsed = false;
   for (const proj of projects.values()) {
     const target = proj.workersTarget || 1;
     if (!proj.projectUrl || proj.projectUrl === 'https://labs.google/fx/tools/flow') {
@@ -324,13 +346,29 @@ const initBrowser = async () => {
       continue;
     }
     if (!UUID_RE.test(proj.projectId)) {
-      console.warn(`[init] project ${proj.slug}: projectId "${proj.projectId}" không phải UUID — skip workers (xoá project qua nút × trên tab UI)`);
+      console.warn(`[init] project ${proj.slug}: projectId "${proj.projectId}" không phải UUID — skip workers`);
       continue;
     }
+
+    // Project ctx: nếu profileDir riêng → launch ctx mới, ngược lại dùng global
+    let projCtx;
+    if (proj.profileDir) {
+      projCtx = await launchCtx(proj.profileDir);
+      console.log(`[init] project ${proj.slug} dùng tài khoản riêng: ${proj.profileDir}`);
+    } else {
+      projCtx = ctx;
+    }
+    proj.ctx = projCtx;
+
     for (let i = 0; i < target; i++) {
       let p;
-      if (isFirstPage) { p = ctx.pages()[0] || await ctx.newPage(); isFirstPage = false; }
-      else p = await ctx.newPage();
+      // Reuse first page của shared ctx (chỉ 1 lần)
+      if (!firstPageUsed && projCtx === ctx) {
+        p = projCtx.pages()[0] || await projCtx.newPage();
+        firstPageUsed = true;
+      } else {
+        p = await projCtx.newPage();
+      }
       const wid = `${proj.slug}-W${i + 1}`;
       console.log(`[init ${wid}] navigate to ${proj.projectUrl}`);
       try {
@@ -338,7 +376,7 @@ const initBrowser = async () => {
         await p.waitForTimeout(4000);
         const url = p.url();
         if (url.includes('accounts.google.com') || url.includes('signin')) {
-          console.error(`[init ${wid}] ❌ Browser bị redirect về login. Cookie expired?`);
+          console.error(`[init ${wid}] ❌ Browser bị redirect về login. Cookie expired? (project profile=${proj.profileDir || 'shared'})`);
         }
         proj.pagePool.push({ page: p, busy: false, id: wid, settingsVerified: false, projectSlug: proj.slug });
         console.log(`[init ${wid}] ✓ ready at ${url}`);
@@ -347,7 +385,7 @@ const initBrowser = async () => {
       }
     }
   }
-  console.log(`[init] ✓ ${allWorkers().length} worker(s) ready across ${projects.size} project(s)`);
+  console.log(`[init] ✓ ${allWorkers().length} worker(s) ready across ${projects.size} project(s) trong ${ctxByProfile.size} browser ctx`);
 };
 
 // x4 trigger 4 request batchGenerateImages liên tiếp. Track 2 counter:
@@ -742,9 +780,11 @@ const genFrame = async ({ worker, prompt, referenceFiles = [], maxRetries = 3, p
   throw lastErr;
 };
 
-const downloadImage = async (url, filepath) => {
+const downloadImage = async (url, filepath, browserCtx = null) => {
   // Mở URL ảnh trong tab mới → goto trả response trực tiếp, không CORS-check
-  const dlPage = await ctx.newPage();
+  // Optional: dùng ctx của project (multi-account) thay vì global ctx
+  const useCtx = browserCtx || ctx;
+  const dlPage = await useCtx.newPage();
   try {
     const resp = await dlPage.goto(url, { timeout: 30000, waitUntil: 'load' });
     if (!resp || !resp.ok()) {
@@ -847,7 +887,7 @@ const runOneFrame = async (proj, cfg, frameIdx, worker, mode = 'serial') => {
     const downloaded = [];
     for (let i = 0; i < variants.length; i++) {
       const local = path.join(proj.outputDir, f.frame_id, `v${i + 1}.png`);
-      await downloadImage(variants[i].fifeUrl, local);
+      await downloadImage(variants[i].fifeUrl, local, worker.page.context());
       downloaded.push({ ...variants[i], localPath: local });
     }
 
@@ -1015,6 +1055,8 @@ app.get('/api/projects', async (req, res) => {
         projectUrl: proj.projectUrl,
         workers: proj.workersTarget,
         hasFrames,
+        profileDir: proj.profileDir, // null = shared account, string = riêng
+        hasOwnProfile: !!proj.profileDir,
       });
     }
     res.json({ projects: arr });
@@ -1026,19 +1068,23 @@ app.get('/api/projects', async (req, res) => {
 // Add project: tạo entry trong projects.json + folder projects/<slug>/. Workers chỉ launch sau restart.
 app.post('/api/projects', async (req, res) => {
   try {
-    const { slug, name, projectId, workers = 1 } = req.body || {};
+    const { slug, name, projectId, workers = 1, separateProfile = false } = req.body || {};
     if (!slug || !/^[a-z][a-z0-9-]{1,63}$/.test(slug)) return res.status(400).json({ error: 'slug phải bắt đầu bằng chữ, chỉ chữ thường + số + dấu gạch, 2-64 ký tự' });
     if (projects.has(slug)) return res.status(409).json({ error: `slug "${slug}" đã tồn tại` });
     if (!projectId) return res.status(400).json({ error: 'projectId bắt buộc' });
-    // Flow project ID là UUID v4 — validate để tránh giá trị bogus như "2" hoặc "111"
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!UUID_RE.test(projectId)) return res.status(400).json({ error: 'projectId phải là UUID (vd "ab883b63-982a-4df4-80ca-f9d6da04ec64") — paste từ URL Flow project' });
     const w = parseInt(workers, 10);
     if (!Number.isFinite(w) || w < 1 || w > 4) return res.status(400).json({ error: 'workers phải là số 1-4' });
 
+    // separateProfile: true → tạo profileDir riêng cho project, có Google account khác
+    const profileDir = separateProfile ? `./profile-${slug}` : null;
+
     const reg = loadProjectsRegistry();
     reg.projects = reg.projects || [];
-    reg.projects.push({ slug, name: name || slug, projectId, workers, createdAt: new Date().toISOString() });
+    const entry = { slug, name: name || slug, projectId, workers, createdAt: new Date().toISOString() };
+    if (profileDir) entry.profileDir = profileDir;
+    reg.projects.push(entry);
     saveProjectsRegistry(reg);
 
     // Tạo project folder + frames.json từ template
@@ -1058,7 +1104,7 @@ app.post('/api/projects', async (req, res) => {
     }
 
     // Add project struct in-memory (workers chưa launch — restart để có)
-    projects.set(slug, makeProject({ slug, name, projectId, workers }));
+    projects.set(slug, makeProject({ slug, name, projectId, workers, profileDir }));
 
     console.log(`[projects] + ${slug} (${projectId}) — restart server để launch ${workers} worker(s)`);
     res.json({ ok: true, slug, restartRequired: true });
@@ -1083,14 +1129,49 @@ app.delete('/api/projects/:slug', async (req, res) => {
     const reg = loadProjectsRegistry();
     reg.projects = (reg.projects || []).filter(p => p.slug !== slug);
     saveProjectsRegistry(reg);
-    // Remove from in-memory
     projects.delete(slug);
-    // Xoá folder (best-effort, có thể fail nếu folder readonly)
+    // Xoá folder project (frames, output, _overrides, _custom_frames)
     const projRoot = path.dirname(proj.framesPath);
     try { await fs.rm(projRoot, { recursive: true, force: true }); }
     catch (e) { console.warn(`[projects] - ${slug}: xoá folder fail: ${e.message}`); }
+    // Xoá profile dir nếu là profile riêng (không xoá nếu share)
+    if (proj.profileDir) {
+      try { await fs.rm(proj.profileDir, { recursive: true, force: true }); console.log(`[projects] - ${slug}: xoá profile dir ${proj.profileDir}`); }
+      catch (e) { console.warn(`[projects] - ${slug}: xoá profileDir fail: ${e.message}`); }
+    }
     console.log(`[projects] - ${slug} đã xoá. Workers cũ (nếu có) idle đến restart.`);
     res.json({ ok: true, slug, restartRequired: proj.pagePool.length > 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reset login cho project — xoá cookies, lần sau gen sẽ redirect login
+// Body: { logout: true } → close ctx + clear cookies + restart hint
+app.post('/api/projects/:slug/reset-login', async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    const proj = projects.get(slug);
+    if (!proj) return res.status(404).json({ error: `Project "${slug}" không tồn tại` });
+    if (proj.jobs.size > 0 || proj.queue.length > 0) {
+      return res.status(409).json({ error: `Project "${slug}" đang có job, stop trước rồi reset` });
+    }
+    if (!proj.ctx) return res.status(400).json({ error: 'Project chưa launch browser ctx' });
+    // Clear cookies trên ctx
+    try {
+      await proj.ctx.clearCookies();
+      console.log(`[reset-login ${slug}] ✓ cleared cookies`);
+    } catch (e) {
+      return res.status(500).json({ error: `clearCookies fail: ${e.message}` });
+    }
+    // Navigate workers về Flow root → user login lại
+    for (const w of proj.pagePool) {
+      try {
+        await w.page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        w.settingsVerified = false;
+      } catch (e) { console.warn(`[reset-login ${slug}] re-nav ${w.id} failed: ${e.message}`); }
+    }
+    res.json({ ok: true, slug, message: `Đã clear cookies. ${proj.pagePool.length} tab(s) navigated to Flow login. Login account mới rồi reload UI.` });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1688,8 +1769,13 @@ app.post('/api/setup/save-frames', async (req, res) => {
   }
 });
 
-process.on('SIGTERM', async () => { await ctx?.close(); process.exit(0); });
-process.on('SIGINT', async () => { await ctx?.close(); process.exit(0); });
+const closeAllCtx = async () => {
+  for (const c of ctxByProfile.values()) {
+    try { await c.close(); } catch {}
+  }
+};
+process.on('SIGTERM', async () => { await closeAllCtx(); process.exit(0); });
+process.on('SIGINT', async () => { await closeAllCtx(); process.exit(0); });
 
 await initBrowser();
 app.listen(PORT, () => {

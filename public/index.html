@@ -98,6 +98,9 @@
   .proj-tab .proj-tab-meta { font-size: 10px; opacity: 0.7; margin-left: 4px; }
   .proj-tab .proj-tab-x { margin-left: 6px; padding: 0 4px; border-radius: 3px; color: #71717a; font-weight: bold; font-size: 13px; }
   .proj-tab .proj-tab-x:hover { background: #7f1d1d; color: #fecaca; }
+  .proj-tab .proj-tab-relogin { font-size: 11px; }
+  .proj-tab .proj-tab-relogin:hover { background: #422006; color: #fde68a; }
+  .proj-tab .proj-tab-account { color: #fbbf24; font-size: 11px; cursor: help; }
   .proj-tab-add { padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #52525b; border: 1px dashed #3f3f46; }
   .proj-tab-add:hover { color: #a1a1aa; border-color: #71717a; }
 </style>
@@ -492,9 +495,23 @@ function renderProjectTabs() {
       meta.textContent = `${p.workers}w`;
       tab.appendChild(meta);
     }
-    tab.title = `${p.slug} · ${p.projectId || 'no project ID'}`;
+    if (p.hasOwnProfile) {
+      const acct = document.createElement('span');
+      acct.className = 'proj-tab-meta proj-tab-account';
+      acct.textContent = '🔑';
+      acct.title = `Tài khoản Google riêng (${p.profileDir})`;
+      tab.appendChild(acct);
+    }
+    tab.title = `${p.slug} · ${p.projectId || 'no project ID'}${p.hasOwnProfile ? ' · account riêng' : ' · share account'}`;
     tab.onclick = () => switchProject(p.slug);
-    // X button (chỉ project ngoài default)
+    // 🔑 button (đổi login)
+    const login = document.createElement('span');
+    login.className = 'proj-tab-x proj-tab-relogin';
+    login.textContent = '🔑';
+    login.title = 'Đổi Google account (clear cookies)';
+    login.onclick = (e) => { e.stopPropagation(); resetProjectLogin(p.slug, p.name); };
+    tab.appendChild(login);
+    // × button (chỉ project ngoài default)
     if (p.slug !== 'default') {
       const x = document.createElement('span');
       x.className = 'proj-tab-x';
@@ -551,15 +568,33 @@ async function openNewProjectPrompt() {
   const projectId = prompt('Flow project ID (UUID — paste từ URL https://labs.google/fx/tools/flow/project/<UUID>):');
   if (!projectId) return;
   const workers = parseInt(prompt('Số workers (1-3):', '1'), 10) || 1;
+  const separateProfile = confirm(
+    `Dùng Google account RIÊNG cho project "${name}"?\n\n` +
+    `OK = Tạo profile dir riêng → lần đầu mở browser sẽ login fresh (account khác).\n` +
+    `Cancel = Share account hiện tại với project default.\n\n` +
+    `→ Account riêng = quota Flow rate-limit độc lập.`
+  );
   try {
     const r = await fetch('/api/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slug, name, projectId, workers })
+      body: JSON.stringify({ slug, name, projectId, workers, separateProfile })
     }).then(r => r.json());
     if (r.error) { toast(r.error, 'error'); return; }
-    toast(`Đã tạo project ${name}. Server cần restart để launch workers cho project mới.`, 'success');
+    const acctMsg = separateProfile ? ` (account RIÊNG — login fresh khi restart)` : ` (share account)`;
+    toast(`Đã tạo project ${name}${acctMsg}. Restart server để launch workers.`, 'success');
     await fetchProjects();
+  } catch (e) {
+    toast('Lỗi: ' + e.message, 'error');
+  }
+}
+
+async function resetProjectLogin(slug, name) {
+  if (!confirm(`Đổi account Google cho project "${name || slug}"?\n\nSẽ xoá cookies + đưa ${slug}'s tabs về trang login Flow. Anh login account mới rồi tab tự refresh.\n\nDùng để:\n- Bypass rate-limit (login account khác)\n- Đổi sang account khác mà không restart server`)) return;
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(slug)}/reset-login`, { method: 'POST' }).then(r => r.json());
+    if (r.error) { toast(r.error, 'error'); return; }
+    toast(r.message || 'Đã reset login', 'success');
   } catch (e) {
     toast('Lỗi: ' + e.message, 'error');
   }
