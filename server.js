@@ -862,31 +862,38 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
   await createBtn.click({ timeout: 10000 });
   console.log(`    [click 1/${burstCount}] submitted at ${new Date().toISOString()}`);
 
-  // Burst: click createBtn thêm (burstCount-1) lần liên tiếp, gap 2-4s giữa các click.
-  // Flow giữ prompt trong textbox sau submit → click lại sẽ gen 4 ảnh nữa với same params.
-  // Nếu textbox bị clear sau click, re-insert prompt trước khi click.
+  // Burst: dồn (burstCount-1) lượt gen thêm bằng nút "Sử dụng lại câu lệnh" (icon
+  // mũi tên cong dưới mỗi thumbnail). Nút này xuất hiện ngay khi thumbnail bắt đầu
+  // load (10-30%) → click để Flow tự re-submit prompt + settings. Đây là cách CHUẨN
+  // (re-clicking Create button không có hiệu lực vì textbox đã clear sau submit).
   for (let i = 2; i <= burstCount; i++) {
-    await sleep(rand(2500, 4000));
+    // Đợi 1.5-3s sau submit trước để thumbnail xuất hiện kèm nút reuse
+    await sleep(rand(1800, 3000));
+    let clicked = false;
+
+    // Strategy 1: theo accessible name (aria-label / tooltip). Locale-flex cho cả VI + EN.
     try {
-      const tb = await findPromptTextbox(page);
-      const cur = await tb.textContent().catch(() => '');
-      if (!cur.includes(prompt.slice(0, 20))) {
-        console.log(`    [burst ${i}/${burstCount}] textbox cleared sau submit trước → re-insert prompt`);
-        await tb.click({ timeout: 5000 });
-        await humanPause(200, 500);
-        await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a').catch(() => {});
-        await sleep(rand(150, 350));
-        await page.keyboard.press('Delete').catch(() => {});
-        await sleep(rand(300, 700));
-        await page.keyboard.insertText(prompt);
-        await humanPause(500, 1000);
-      }
-      const btn = await findCreateButton(page);
-      await btn.click({ timeout: 10000 });
-      console.log(`    [click ${i}/${burstCount}] submitted at ${new Date().toISOString()}`);
-    } catch (e) {
-      console.warn(`    [burst ${i}/${burstCount}] click fail (${e.message.split('\n')[0]}) — bỏ qua, tiếp tục đợi capture`);
+      const byName = page.getByRole('button', { name: /s[ưử]\s*d[uụ]ng\s*l[aạ]i\s*c[aâ]u\s*l[eệ]nh|reuse\s*prompt/i }).first();
+      await byName.click({ timeout: 4000 });
+      clicked = true;
+    } catch (e) {}
+
+    // Strategy 2: theo Material Icon name trong button (visible text). Icon 'keyboard_return'
+    // hoặc 'subdirectory_arrow_left' / 'replay' — universal không đổi theo locale.
+    if (!clicked) {
+      try {
+        const byIcon = page.locator('button').filter({ hasText: /^(keyboard_return|subdirectory_arrow_left|replay|redo|u_turn_left)$/ }).first();
+        await byIcon.click({ timeout: 3000 });
+        clicked = true;
+      } catch (e) {}
     }
+
+    if (!clicked) {
+      await debugShot(`burst_reuse_btn_missing_${i}`, page);
+      console.warn(`    [burst ${i}/${burstCount}] không tìm thấy nút "Sử dụng lại câu lệnh" — dừng burst`);
+      break;
+    }
+    console.log(`    [burst ${i}/${burstCount}] clicked "Sử dụng lại câu lệnh"`);
   }
 
   let media;
