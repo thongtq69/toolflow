@@ -205,6 +205,12 @@
         <label class="text-xs text-zinc-400 block mb-1">Action prompt <span class="text-red-400">*</span></label>
         <textarea id="nf-action" class="input w-full mono text-xs" rows="6" placeholder="Mô tả action / chuyển động / ánh sáng..."></textarea>
       </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1">Ref images (upload từ máy, không bắt buộc)</label>
+        <input id="nf-files" type="file" accept="image/*" multiple class="input w-full text-xs">
+        <div id="nf-files-preview" class="flex flex-wrap gap-2 mt-2"></div>
+        <p class="text-[10px] text-zinc-500 mt-1">Chọn 1+ ảnh local — sẽ upload lên Flow như reference. Kết hợp với Default reference (nếu có).</p>
+      </div>
     </div>
     <div class="flex gap-2 mt-5 justify-end">
       <button id="btn-cancel-add" class="btn btn-zinc">Cancel</button>
@@ -792,6 +798,9 @@ $('btn-add-frame').onclick = () => {
   $('nf-id').value = '';
   $('nf-topic').value = '';
   $('nf-action').value = '';
+  $('nf-files').value = '';
+  $('nf-files-preview').innerHTML = '';
+  newFrameUploadedRefs.length = 0;
   // populate ref dropdown
   const sel = $('nf-ref');
   sel.innerHTML = '<option value="">— no ref —</option>';
@@ -804,6 +813,54 @@ $('btn-add-frame').onclick = () => {
   $('new-frame-modal').style.display = 'flex';
   setTimeout(() => $('nf-id').focus(), 50);
 };
+
+// Refs uploaded cho frame mới (server paths)
+const newFrameUploadedRefs = [];
+const fileToBase64 = (file) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(r.result);
+  r.onerror = reject;
+  r.readAsDataURL(file);
+});
+
+$('nf-files').addEventListener('change', async (e) => {
+  const files = [...(e.target.files || [])];
+  if (files.length === 0) return;
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) { toast(`Bỏ qua file không phải ảnh: ${file.name}`, 'error'); continue; }
+    if (file.size > 20 * 1024 * 1024) { toast(`${file.name} > 20MB, bỏ qua`, 'error'); continue; }
+    try {
+      const dataUrl = await fileToBase64(file);
+      const base64 = dataUrl.split(',')[1] || '';
+      const r = await fetch('/api/upload-reference', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, base64 })
+      }).then(r => r.json());
+      if (r.error) { toast(r.error, 'error'); continue; }
+      newFrameUploadedRefs.push(r.path);
+      // preview thumbnail
+      const wrap = document.createElement('div');
+      wrap.className = 'relative';
+      wrap.innerHTML = `
+        <img src="${dataUrl}" class="w-16 h-16 object-cover rounded border border-zinc-700">
+        <button class="absolute -top-1 -right-1 bg-red-600 hover:bg-red-500 text-white rounded-full w-5 h-5 text-xs leading-none" data-path="${r.path}">×</button>
+        <div class="text-[9px] text-zinc-500 truncate w-16 mt-0.5">${file.name.slice(0, 14)}</div>
+      `;
+      wrap.querySelector('button').onclick = (ev) => {
+        const p = ev.target.dataset.path;
+        const idx = newFrameUploadedRefs.indexOf(p);
+        if (idx >= 0) newFrameUploadedRefs.splice(idx, 1);
+        wrap.remove();
+      };
+      $('nf-files-preview').appendChild(wrap);
+    } catch (err) {
+      toast(`Upload fail: ${file.name} — ${err.message}`, 'error');
+    }
+  }
+  e.target.value = '';
+});
+
 $('btn-close-modal').onclick = () => { $('new-frame-modal').style.display = 'none'; };
 $('btn-cancel-add').onclick = () => { $('new-frame-modal').style.display = 'none'; };
 $('btn-submit-add').onclick = async () => {
@@ -813,9 +870,11 @@ $('btn-submit-add').onclick = async () => {
   const default_reference = $('nf-ref').value || null;
   if (!frame_id) { toast('Frame ID không được rỗng', 'error'); return; }
   if (!action) { toast('Action prompt không được rỗng', 'error'); return; }
-  const r = await api('/api/add-frame', { frame_id, topic, action, default_reference });
+  const body = { frame_id, topic, action, default_reference };
+  if (newFrameUploadedRefs.length > 0) body.reference_files = [...newFrameUploadedRefs];
+  const r = await api('/api/add-frame', body);
   if (r && !r.error) {
-    toast(`Đã tạo ${frame_id}`, 'success');
+    toast(`Đã tạo ${frame_id}${body.reference_files ? ' với ' + body.reference_files.length + ' ref' : ''}`, 'success');
     $('new-frame-modal').style.display = 'none';
     fetchState();
   }

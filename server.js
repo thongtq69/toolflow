@@ -751,7 +751,8 @@ app.use(express.static(PUBLIC_DIR));
 
 app.get('/health', async (req, res) => {
   try {
-    res.json({ ok: true, browserReady: !!page, url: page?.url() });
+    const w0 = pagePool[0];
+    res.json({ ok: true, browserReady: pagePool.length > 0, workers: pagePool.length, url: w0?.page?.url() });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -1209,6 +1210,29 @@ app.get('/api/setup/status', async (req, res) => {
     workersReady: pagePool.length,
     setupComplete: !!PROJECT_ID && hasCookies && hasFrames && pagePool.length > 0,
   });
+});
+
+// Upload reference image — body { filename, base64 } → save vào output/_uploads/ → trả path
+app.post('/api/upload-reference', async (req, res) => {
+  try {
+    const { filename, base64 } = req.body || {};
+    if (!filename || !base64) return res.status(400).json({ error: 'filename + base64 bắt buộc' });
+    // Strip data URL prefix nếu có ("data:image/png;base64,...")
+    const b64 = base64.replace(/^data:[^;]+;base64,/, '');
+    const buf = Buffer.from(b64, 'base64');
+    if (buf.length === 0) return res.status(400).json({ error: 'base64 invalid' });
+    if (buf.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'File quá lớn (>20MB)' });
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const uploadsDir = path.join(OUTPUT_DIR, '_uploads');
+    await fs.mkdir(uploadsDir, { recursive: true });
+    const filepath = path.join(uploadsDir, `${ts}_${safeName}`);
+    await fs.writeFile(filepath, buf);
+    console.log(`[upload] saved ${path.basename(filepath)} (${(buf.length / 1024).toFixed(1)} KB)`);
+    res.json({ ok: true, path: filepath, size: buf.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Upload frames.json từ UI (template hoặc paste JSON)
