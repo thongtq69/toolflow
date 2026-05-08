@@ -271,11 +271,13 @@ const captureGenBatch = (page, timeoutMs = 300_000, idleMs = 180_000) => {
       return false;
     };
 
+    let rateLimit403Count = 0;
     const respHandler = async (response) => {
       const url = response.url();
       if (!url.includes('flowMedia:batchGenerateImages')) return;
       const status = response.status();
       responseTotal++;
+      if (status === 403 || status === 429) rateLimit403Count++;
       let mediaCount = 0;
       let validMedia = [];
       try {
@@ -294,6 +296,20 @@ const captureGenBatch = (page, timeoutMs = 300_000, idleMs = 180_000) => {
         }
       } catch (e) {}
       console.log(`    [capture] resp #${responseTotal}/${requestCount || '?'} status=${status} media=${mediaCount} valid=${validMedia.length} total=${allMedia.length}`);
+
+      // Hard rate-limit detect: tất cả response 403/429 và đã nhận đủ → fail nhanh, không chờ idle 180s
+      if (requestCount > 0 && responseTotal >= requestCount && rateLimit403Count === responseTotal && responseSuccess === 0) {
+        clearTimeout(graceTimer);
+        graceTimer = setTimeout(() => {
+          clearTimeout(timeoutTimer);
+          clearTimeout(idleTimer);
+          page.off('request', reqHandler);
+          page.off('response', respHandler);
+          console.log(`    [capture] ✗ rate-limit detected — ${rateLimit403Count}/${responseTotal} responses 403`);
+          reject(new Error(`Rate limited by Flow API (HTTP 403 on all ${responseTotal}/${requestCount} requests). Account/IP đang bị Google chặn — đợi vài giờ hoặc đổi IP/account.`));
+        }, 1500);
+        return;
+      }
 
       // Match-count check (early resolve)
       if (checkAllResponded()) return;
