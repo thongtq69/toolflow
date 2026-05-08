@@ -360,6 +360,11 @@
       <div id="st-restart-warn" class="restart-warn" style="display:none;">
         ⚠ Workers/Port/Dirs đã đổi — cần restart server (Ctrl+C + npm start)
       </div>
+      <div class="border-t border-zinc-800 pt-3 mt-2">
+        <label class="text-xs text-zinc-400 block mb-1">Frames storyboard</label>
+        <button id="btn-load-template" class="btn btn-purple text-xs w-full">📋 Load template 10-frame Resort Eco (đè frames.json)</button>
+        <p class="text-[10px] text-zinc-500 mt-1">Bấm để overwrite frames.json hiện tại bằng template demo. Hữu ích nếu lỡ lưu stub empty trong wizard.</p>
+      </div>
     </div>
     <div class="flex gap-2 mt-5 justify-end">
       <button id="btn-cancel-settings" class="btn btn-zinc">Cancel</button>
@@ -1213,6 +1218,26 @@ async function openSettingsModal() {
 }
 
 $('btn-settings').onclick = openSettingsModal;
+
+$('btn-load-template').onclick = async () => {
+  if (!confirm('Đè frames.json hiện tại bằng template 10-frame Resort Eco? Các custom frames đã thêm vẫn giữ.')) return;
+  $('btn-load-template').disabled = true;
+  $('btn-load-template').textContent = '⏳ đang load...';
+  try {
+    const r = await fetch('/api/setup/use-template', { method: 'POST' }).then(r => r.json());
+    if (r.error) { toast(r.error, 'error'); }
+    else {
+      toast(`✓ Đã load ${r.framesCount} frame template`, 'success');
+      $('settings-modal').style.display = 'none';
+      fetchState();
+    }
+  } catch (e) {
+    toast('Load fail: ' + e.message, 'error');
+  } finally {
+    $('btn-load-template').disabled = false;
+    $('btn-load-template').textContent = '📋 Load template 10-frame Resort Eco (đè frames.json)';
+  }
+};
 $('btn-close-settings').onclick = () => { $('settings-modal').style.display = 'none'; };
 $('btn-cancel-settings').onclick = () => { $('settings-modal').style.display = 'none'; };
 $('settings-modal').addEventListener('click', (e) => {

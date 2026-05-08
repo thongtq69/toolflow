@@ -1302,6 +1302,23 @@ app.get('/api/setup/template-frames', async (req, res) => {
   }
 });
 
+// Reload template ngay vào frames.json — tiện cho user lúc đầu đã save stub empty
+app.post('/api/setup/use-template', async (req, res) => {
+  try {
+    const tplPath = path.resolve(__dirname, './frames.example.json');
+    const content = await fs.readFile(tplPath, 'utf8');
+    const parsed = JSON.parse(content);
+    if (!parsed.frames || !Array.isArray(parsed.frames)) {
+      return res.status(500).json({ error: 'template invalid' });
+    }
+    await fs.writeFile(FRAMES_PATH, JSON.stringify(parsed, null, 2));
+    console.log(`[setup] đã load template (${parsed.frames.length} frames) vào ${FRAMES_PATH}`);
+    res.json({ ok: true, framesCount: parsed.frames.length, path: FRAMES_PATH });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Upload frames.json từ UI (template hoặc paste JSON)
 app.post('/api/setup/save-frames', async (req, res) => {
   try {
