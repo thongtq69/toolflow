@@ -75,12 +75,19 @@
   .check-icon { color: #10b981; font-size: 16px; }
   .wizard-hint { font-size: 11px; color: #71717a; margin-top: 4px; }
   .restart-warn { background: #422006; border: 1px solid #d97706; color: #fbbf24; padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-top: 8px; }
-  /* ref chip — multi-select cho extra_references */
+  /* ref chip — multi-select cho extra_references; tất cả đều click được */
   .ref-chip { padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; border: 1px solid #3f3f46; background: #18181b; color: #a1a1aa; cursor: pointer; user-select: none; transition: all 0.12s; }
-  .ref-chip:hover { border-color: #60a5fa; color: #e4e4e7; }
+  .ref-chip:hover { border-color: #60a5fa; color: #e4e4e7; transform: translateY(-1px); }
+  /* Đã pick variant — có border xanh nhẹ, hover sáng */
+  .ref-chip.ref-chip-picked { border-color: #10b981; color: #6ee7b7; }
+  /* Có output chưa pick — border vàng nhẹ */
+  .ref-chip.ref-chip-hasoutput { border-color: #ca8a04; color: #fcd34d; }
+  /* Chưa gen lần nào — chữ xám mờ */
+  .ref-chip.ref-chip-empty-state { color: #71717a; }
+  /* Active (đã chọn) override mọi state, fill xanh */
   .ref-chip.ref-chip-active { background: #1e3a8a; border-color: #60a5fa; color: #dbeafe; }
-  .ref-chip.ref-chip-disabled { opacity: 0.4; cursor: not-allowed; }
-  .ref-chip.ref-chip-disabled:hover { border-color: #3f3f46; color: #a1a1aa; }
+  .ref-chip.ref-chip-active.ref-chip-picked { background: #064e3b; border-color: #10b981; color: #d1fae5; }
+  .ref-chip.ref-chip-active.ref-chip-hasoutput { background: #422006; border-color: #ca8a04; color: #fde68a; }
   .ref-chip-empty { font-size: 11px; color: #52525b; font-style: italic; }
 </style>
 </head>
@@ -151,9 +158,13 @@
           <label class="text-[11px] text-zinc-500 mb-1 block">Action prompt (chỉ override action, không động setting/style)</label>
           <textarea id="edit-action-text" class="input mono w-full text-xs" rows="6"></textarea>
 
-          <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">Extra references (multi-select frame đã pick)</label>
+          <label class="text-[11px] text-zinc-500 mt-3 mb-1 block">Extra references (chọn tự do)</label>
           <div id="edit-extra-refs" class="flex flex-wrap gap-1 border border-zinc-800 rounded p-2 bg-zinc-950 min-h-[40px]"></div>
-          <p class="text-[10px] text-zinc-500 mt-1">Bot sẽ upload các frame này cùng với default reference. Frame chưa pick sẽ bị skip (warning trong log).</p>
+          <p class="text-[10px] text-zinc-500 mt-1">
+            <span class="text-emerald-400">✓ picked</span> = dùng variant đã pick ·
+            <span class="text-amber-400">◌ has output</span> = dùng v1.png fallback ·
+            <span class="text-zinc-500">⚠ empty</span> = chưa gen, sẽ skip lúc gen
+          </p>
 
           <div class="flex gap-2 mt-3">
             <button id="btn-save-action" class="btn btn-emerald text-xs">💾 Save</button>
@@ -215,9 +226,11 @@
         </select>
       </div>
       <div>
-        <label class="text-xs text-zinc-400 block mb-1">Extra references (multi-select)</label>
+        <label class="text-xs text-zinc-400 block mb-1">Extra references (chọn tự do)</label>
         <div id="nf-extra-refs" class="flex flex-wrap gap-1 border border-zinc-800 rounded p-2 bg-zinc-950 min-h-[40px]"></div>
-        <p class="text-[10px] text-zinc-500 mt-1">Click chip để toggle. Frame phải đã được pick variant — chưa pick sẽ bị skip lúc gen.</p>
+        <p class="text-[10px] text-zinc-500 mt-1">
+          <span class="text-emerald-400">✓ picked</span> · <span class="text-amber-400">◌ has output</span> (dùng v1.png) · <span class="text-zinc-500">⚠ empty</span> (sẽ skip)
+        </p>
       </div>
       <div>
         <label class="text-xs text-zinc-400 block mb-1">Action prompt <span class="text-red-400">*</span></label>
@@ -527,7 +540,8 @@ function effectiveExtraRefs(f) {
   return Array.isArray(f.extra_references) ? f.extra_references : [];
 }
 
-// Render multi-select chips — frame nào đã pick mới enable
+// Render multi-select chips — TẤT CẢ frame đều click được tự do.
+// 3 trạng thái: ✓ picked (xanh) / ◌ has output chưa pick (vàng nhẹ) / ⊘ chưa gen (mờ ⚠)
 function renderRefChips(container, frames, currentFrameId, selectedSet, onChange) {
   container.innerHTML = '';
   const candidates = frames.filter(f => f.frame_id !== currentFrameId);
@@ -537,13 +551,31 @@ function renderRefChips(container, frames, currentFrameId, selectedSet, onChange
   }
   candidates.forEach(f => {
     const isPicked = !!appState.state?.picked?.[f.frame_id];
-    const chip = document.createElement('span');
+    const hasOutput = !!f.has_output;
     const active = selectedSet.has(f.frame_id);
-    chip.className = 'ref-chip' + (active ? ' ref-chip-active' : '') + (!isPicked ? ' ref-chip-disabled' : '');
-    chip.textContent = f.frame_id + (isPicked ? '' : ' ⚠');
-    chip.title = isPicked
-      ? (active ? 'Đã chọn — click để bỏ' : 'Click để thêm')
-      : 'Frame chưa pick variant — sẽ skip lúc gen';
+
+    let icon = '';
+    let cls = 'ref-chip';
+    let tip = '';
+    if (isPicked) {
+      icon = ' ✓';
+      cls += ' ref-chip-picked';
+      tip = active ? 'Đã pick — Click để BỎ' : 'Đã pick variant — Click để thêm (dùng variant đã pick)';
+    } else if (hasOutput) {
+      icon = ' ◌';
+      cls += ' ref-chip-hasoutput';
+      tip = active ? 'Có output (chưa pick) — Click để BỎ' : 'Có gen rồi nhưng chưa pick — Click để thêm (bot dùng v1.png fallback)';
+    } else {
+      icon = ' ⚠';
+      cls += ' ref-chip-empty-state';
+      tip = active ? 'Chưa gen — vẫn dùng được nếu sau này có (bot sẽ skip nếu vẫn trống lúc gen)' : 'Frame chưa gen lần nào — Click để add (sẽ skip nếu chưa có lúc gen)';
+    }
+    if (active) cls += ' ref-chip-active';
+
+    const chip = document.createElement('span');
+    chip.className = cls;
+    chip.textContent = f.frame_id + icon;
+    chip.title = tip;
     chip.onclick = () => {
       if (selectedSet.has(f.frame_id)) selectedSet.delete(f.frame_id);
       else selectedSet.add(f.frame_id);
@@ -838,12 +870,16 @@ $('btn-gen-this-frame').onclick = async () => {
   const f = appState.frames?.find(x => x.frame_id === frameId);
   if (!f) return;
 
-  // Cảnh báo nếu default_reference chưa pick → bot sẽ skip ref → ảnh sai style
+  // Cảnh báo chỉ khi ref chưa gen lần nào (không có v1.png + chưa pick)
+  // Has output (chưa pick) → bot tự fallback v1.png, không cần warn
   const allRefs = [f.default_reference, ...effectiveExtraRefs(f)].filter(Boolean);
-  const unmet = allRefs.filter(rid => !appState.state?.picked?.[rid]);
-  if (unmet.length > 0) {
+  const empty = allRefs.filter(rid => {
+    const rf = appState.frames?.find(x => x.frame_id === rid);
+    return !rf || (!appState.state?.picked?.[rid] && !rf.has_output);
+  });
+  if (empty.length > 0) {
     const ok = confirm(
-      `${frameId} cần ref [${allRefs.join(', ')}] nhưng chưa pick: ${unmet.join(', ')}.\n\n` +
+      `${frameId} cần ref [${allRefs.join(', ')}] nhưng chưa gen lần nào: ${empty.join(', ')}.\n\n` +
       `Bot sẽ gen mà không upload các ref đó (style có thể sai). Tiếp tục?`
     );
     if (!ok) return;

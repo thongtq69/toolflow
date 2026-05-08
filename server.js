@@ -642,23 +642,35 @@ const runOneFrame = async (cfg, frameIdx, worker, mode = 'serial') => {
 
   const state = await loadState();
   const refs = [];
-  const resolvePickedPath = (frameId) => {
+  // Resolve frame ref → file path. Ưu tiên: (1) variant đã pick → (2) fallback v1.png nếu có
+  // → (3) null nếu frame chưa gen lần nào.
+  const resolveFrameRef = (frameId) => {
     const picked = state.picked?.[frameId];
-    if (!picked) return null;
-    return picked.filePath
-      ? (path.isAbsolute(picked.filePath) ? picked.filePath : path.join(OUTPUT_DIR, picked.filePath))
-      : path.join(OUTPUT_DIR, frameId, `v${(picked.pickedIdx ?? 0) + 1}.png`);
+    if (picked) {
+      const p = picked.filePath
+        ? (path.isAbsolute(picked.filePath) ? picked.filePath : path.join(OUTPUT_DIR, picked.filePath))
+        : path.join(OUTPUT_DIR, frameId, `v${(picked.pickedIdx ?? 0) + 1}.png`);
+      return { path: p, source: 'picked' };
+    }
+    // Fallback: dùng v1.png nếu frame đã gen nhưng chưa pick
+    const v1 = path.join(OUTPUT_DIR, frameId, 'v1.png');
+    if (fsSync.existsSync(v1)) return { path: v1, source: 'v1-fallback' };
+    return null;
   };
   if (f.default_reference) {
-    const p = resolvePickedPath(f.default_reference);
-    if (p) refs.push(p);
-    else console.warn(`[refs] ${f.frame_id}: default_reference ${f.default_reference} chưa được pick — skip`);
+    const r = resolveFrameRef(f.default_reference);
+    if (r) {
+      refs.push(r.path);
+      if (r.source === 'v1-fallback') console.log(`[refs] ${f.frame_id}: default_reference ${f.default_reference} chưa pick → dùng v1.png fallback`);
+    } else console.warn(`[refs] ${f.frame_id}: default_reference ${f.default_reference} chưa gen — skip`);
   }
   for (const fid of effectiveExtraRefs) {
     if (fid === f.default_reference) continue; // dedupe
-    const p = resolvePickedPath(fid);
-    if (p) refs.push(p);
-    else console.warn(`[refs] ${f.frame_id}: extra_reference ${fid} chưa được pick — skip`);
+    const r = resolveFrameRef(fid);
+    if (r) {
+      refs.push(r.path);
+      if (r.source === 'v1-fallback') console.log(`[refs] ${f.frame_id}: extra_reference ${fid} chưa pick → dùng v1.png fallback`);
+    } else console.warn(`[refs] ${f.frame_id}: extra_reference ${fid} chưa gen — skip`);
   }
   if (Array.isArray(f.reference_files)) {
     for (const rf of f.reference_files) {
@@ -848,7 +860,9 @@ app.get('/api/state', async (req, res) => {
       if (jobsByFrame[f.frame_id]) status = jobsByFrame[f.frame_id].status;
       else if (picked) status = 'picked';
       const hasOv = !!(override?.action || (Array.isArray(override?.extra_references) && override.extra_references.length > 0));
-      return { ...f, status, picked, override, has_override: hasOv };
+      // Có ảnh trên đĩa? (đã gen ít nhất 1 lần — kể cả chưa pick)
+      const hasOutput = fsSync.existsSync(path.join(OUTPUT_DIR, f.frame_id, 'v1.png'));
+      return { ...f, status, picked, override, has_override: hasOv, has_output: hasOutput };
     });
     res.json({
       frames: framesWithStatus,
