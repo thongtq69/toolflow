@@ -52,7 +52,11 @@ const WORKER_COUNT = num(process.env.WORKERS, appConfig.workers); // số tab pa
 const rand = (a, b) => a + Math.random() * (b - a);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const humanPause = (min = 800, max = 2400) => sleep(rand(min, max));
-let lastGenAt = 0; // GLOBAL — Flow rate-limit per-account, scoping per-project would 2x rate at IP level
+// Cooldown PER-PROFILE: projects share account chung cùng cooldown; projects với
+// separate profile (account riêng) có cooldown độc lập → chạy song song được.
+// Key = absolute profile path. Value = timestamp last gen finished.
+const lastGenByProfile = new Map();
+let lastGenAt = 0; // legacy global, vẫn ghi để giữ backward-compat
 
 // ─── Project registry + per-project state ───
 const PROJECTS_REGISTRY_PATH = resolveDir('./projects.json');
@@ -764,11 +768,15 @@ const findPromptTextbox = async (page) => {
 const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, burstCount = 1 }) => {
   const page = worker.page;
   const wid = worker.id;
-  // ─── Anti-detection: cooldown giữa 2 lần gen (GLOBAL cho mọi worker và project — share rate limit per IP/account)
-  const elapsed = (Date.now() - lastGenAt) / 1000;
-  if (lastGenAt > 0 && elapsed < COOLDOWN_AFTER_GEN_MIN) {
+  // ─── Anti-detection: cooldown PER-PROFILE.
+  // Projects share profile → share cooldown (Flow rate-limit per account).
+  // Projects với separate profile → cooldown độc lập → chạy song song được.
+  const profilePath = proj?.profileDir ? path.resolve(proj.profileDir) : path.resolve(USER_DATA_DIR);
+  const lastGen = lastGenByProfile.get(profilePath) || 0;
+  const elapsed = (Date.now() - lastGen) / 1000;
+  if (lastGen > 0 && elapsed < COOLDOWN_AFTER_GEN_MIN) {
     const wait = rand(COOLDOWN_AFTER_GEN_MIN - elapsed, COOLDOWN_AFTER_GEN_MAX - elapsed);
-    console.log(`  [${wid} cooldown] sleep ${wait.toFixed(1)}s before next gen`);
+    console.log(`  [${wid} cooldown] sleep ${wait.toFixed(1)}s before next gen (profile=${path.basename(profilePath)})`);
     await sleep(wait * 1000);
   }
 
@@ -918,7 +926,9 @@ const genFrameOnce = async ({ worker, prompt, referenceFiles = [], proj = null, 
   } finally {
     page.off('request', reqLogger);
     page.off('response', respLogger);
-    lastGenAt = Date.now();
+    const now = Date.now();
+    lastGenAt = now;
+    lastGenByProfile.set(profilePath, now);
   }
 
   // Detect failed generation (Google flagged)
