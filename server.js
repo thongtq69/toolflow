@@ -985,6 +985,45 @@ app.get('/api/projects', async (req, res) => {
   }
 });
 
+// Add project: tạo entry trong projects.json + folder projects/<slug>/. Workers chỉ launch sau restart.
+app.post('/api/projects', async (req, res) => {
+  try {
+    const { slug, name, projectId, workers = 1 } = req.body || {};
+    if (!slug || !/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'slug invalid (lowercase alphanumeric + dashes)' });
+    if (projects.has(slug)) return res.status(409).json({ error: `slug "${slug}" đã tồn tại` });
+    if (!projectId) return res.status(400).json({ error: 'projectId bắt buộc' });
+
+    const reg = loadProjectsRegistry();
+    reg.projects = reg.projects || [];
+    reg.projects.push({ slug, name: name || slug, projectId, workers, createdAt: new Date().toISOString() });
+    saveProjectsRegistry(reg);
+
+    // Tạo project folder + frames.json từ template
+    const projRoot = resolveDir(`./projects/${slug}`);
+    await fs.mkdir(path.join(projRoot, 'output'), { recursive: true });
+    const exampleSrc = path.resolve(__dirname, 'frames.example.json');
+    const framesDest = path.join(projRoot, 'frames.json');
+    try {
+      const src = await fs.readFile(exampleSrc, 'utf8');
+      const tpl = JSON.parse(src);
+      tpl.project = tpl.project || {};
+      tpl.project.flow_project_id = projectId;
+      tpl.project.name = name || slug;
+      await fs.writeFile(framesDest, JSON.stringify(tpl, null, 2));
+    } catch (e) {
+      await fs.writeFile(framesDest, JSON.stringify({ project: { name, flow_project_id: projectId }, blocks: { setting: '', style: '' }, frames: [] }, null, 2));
+    }
+
+    // Add project struct in-memory (workers chưa launch — restart để có)
+    projects.set(slug, makeProject({ slug, name, projectId, workers }));
+
+    console.log(`[projects] + ${slug} (${projectId}) — restart server để launch ${workers} worker(s)`);
+    res.json({ ok: true, slug, restartRequired: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── State (per-project) ───
 const handleState = async (proj, req, res) => {
   const cfg = await loadFrames(proj);

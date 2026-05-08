@@ -89,15 +89,23 @@
   .ref-chip.ref-chip-active.ref-chip-picked { background: #064e3b; border-color: #10b981; color: #d1fae5; }
   .ref-chip.ref-chip-active.ref-chip-hasoutput { background: #422006; border-color: #ca8a04; color: #fde68a; }
   .ref-chip-empty { font-size: 11px; color: #52525b; font-style: italic; }
+  /* project tabs */
+  .proj-tab { padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; user-select: none; transition: all 0.12s; border: 1px solid transparent; color: #71717a; }
+  .proj-tab:hover { background: #18181b; color: #d4d4d8; }
+  .proj-tab.proj-tab-active { background: #1e3a8a; border-color: #60a5fa; color: #dbeafe; }
+  .proj-tab .proj-tab-meta { font-size: 10px; opacity: 0.7; margin-left: 4px; }
+  .proj-tab-add { padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #52525b; border: 1px dashed #3f3f46; }
+  .proj-tab-add:hover { color: #a1a1aa; border-color: #71717a; }
 </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 h-screen overflow-hidden flex flex-col">
 
 <!-- HEADER -->
 <header class="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex items-center justify-between">
-  <div class="flex items-center gap-3">
-    <div class="text-emerald-400 text-lg font-bold">▶ VideoFlow</div>
-    <div class="text-xs text-zinc-500">Frame Bank</div>
+  <div class="flex items-center gap-3 min-w-0">
+    <div class="text-emerald-400 text-lg font-bold shrink-0">▶ VideoFlow</div>
+    <!-- Project tabs -->
+    <div id="project-tabs" class="flex items-center gap-1 shrink-0"></div>
     <div id="job-badge" class="badge badge-pending">idle</div>
     <div id="job-progress" class="text-xs text-zinc-400"></div>
     <div id="job-count" class="text-xs text-zinc-500"></div>
@@ -423,23 +431,103 @@ function toast(msg, type) {
   setTimeout(() => { t.classList.add('fade-out'); setTimeout(() => t.remove(), 400); }, 3000);
 }
 
-// ─── SSE log + job updates ───
+// ─── SSE log + job updates (filtered by current project) ───
 function connectSSE() {
   const evt = new EventSource('/api/logs');
   evt.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.type === 'log') appendLog(m.entry);
+    if (m.type === 'log') appendLog(m.entry); // logs từ tất cả projects (không filter — user thấy hết)
     else if (m.type === 'job') {
+      // Job event tag với slug. Bỏ qua nếu không phải project hiện tại.
+      if (m.slug && m.slug !== currentSlug) return;
       appState.job = m.job;
       renderJobStatus();
       renderFrameList();
-      // If user not viewing a different frame, follow the job
       if (viewState.frameId === null || viewState.frameId === m.job?.frameId) {
         renderCenter();
       }
+    } else if (m.type === 'jobs') {
+      if (m.slug && m.slug !== currentSlug) return;
+      appState.jobs = m.jobs;
+      appState.queue_size = m.queue;
+      renderJobStatus();
+      renderFrameList();
     }
   };
   evt.onerror = () => { console.warn('SSE disconnect, retry in 2s'); setTimeout(connectSSE, 2000); };
+}
+
+// ─── Project tabs ───
+let projectsList = [];
+async function fetchProjects() {
+  try {
+    const r = await fetch('/api/projects').then(r => r.json());
+    projectsList = r.projects || [];
+    // If current slug invalid, fall back to first
+    if (!projectsList.some(p => p.slug === currentSlug)) {
+      currentSlug = projectsList[0]?.slug || 'default';
+      localStorage.setItem('vf:currentSlug', currentSlug);
+    }
+    renderProjectTabs();
+  } catch (e) {
+    console.warn('fetchProjects failed:', e.message);
+  }
+}
+function renderProjectTabs() {
+  const wrap = $('project-tabs');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  projectsList.forEach(p => {
+    const tab = document.createElement('div');
+    tab.className = 'proj-tab' + (p.slug === currentSlug ? ' proj-tab-active' : '');
+    tab.textContent = p.name || p.slug;
+    if (p.workers) tab.innerHTML += `<span class="proj-tab-meta">${p.workers}w</span>`;
+    tab.title = `${p.slug} · ${p.projectId || 'no project ID'}`;
+    tab.onclick = () => switchProject(p.slug);
+    wrap.appendChild(tab);
+  });
+  // + Add project (basic — opens prompt to create new project entry)
+  const add = document.createElement('div');
+  add.className = 'proj-tab-add';
+  add.textContent = '+';
+  add.title = 'Thêm project mới (paste projectId)';
+  add.onclick = openNewProjectPrompt;
+  wrap.appendChild(add);
+}
+async function switchProject(slug) {
+  if (slug === currentSlug) return;
+  currentSlug = slug;
+  localStorage.setItem('vf:currentSlug', slug);
+  // Clear view state khi switch
+  viewState.frameId = null;
+  viewState.frameData = null;
+  // Re-render
+  renderProjectTabs();
+  await fetchState();
+  renderCenter();
+  toast(`Đã switch sang project: ${slug}`, 'success');
+}
+async function openNewProjectPrompt() {
+  const name = prompt('Tên project (vd: "Cafe Luxury"):');
+  if (!name) return;
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (!slug) { toast('Tên không hợp lệ', 'error'); return; }
+  if (projectsList.some(p => p.slug === slug)) { toast(`Slug "${slug}" đã tồn tại`, 'error'); return; }
+  const projectId = prompt('Flow project ID (UUID — paste từ URL https://labs.google/fx/tools/flow/project/<UUID>):');
+  if (!projectId) return;
+  const workers = parseInt(prompt('Số workers (1-3):', '1'), 10) || 1;
+  try {
+    const r = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug, name, projectId, workers })
+    }).then(r => r.json());
+    if (r.error) { toast(r.error, 'error'); return; }
+    toast(`Đã tạo project ${name}. Server cần restart để launch workers cho project mới.`, 'success');
+    await fetchProjects();
+  } catch (e) {
+    toast('Lỗi: ' + e.message, 'error');
+  }
 }
 
 function appendLog(entry) {
@@ -469,7 +557,7 @@ function getActiveJobs() {
 // ─── State fetch + render ───
 async function fetchState() {
   try {
-    const r = await fetch('/api/state').then(r => r.json());
+    const r = await fetch(apiUrl('/api/state')).then(r => r.json());
     if (r.error) return;
     appState = r;
     if (!appState.overrides) appState.overrides = {};
@@ -642,7 +730,7 @@ async function viewFrame(frameId) {
   $('empty-state').style.display = 'none';
   $('variants-grid').innerHTML = `<div class="col-span-2 text-center py-8 text-zinc-500"><div class="text-2xl mb-2 animate-pulse">⏳</div><div class="text-sm">Loading ${escapeHtml(frameId)}...</div></div>`;
   try {
-    const r = await fetch(`/api/frame/${encodeURIComponent(frameId)}`).then(r => r.json());
+    const r = await fetch(apiUrl(`/api/frame/${encodeURIComponent(frameId)}`)).then(r => r.json());
     viewState.frameData = r;
     renderCenter();
   } catch (e) {
@@ -734,7 +822,7 @@ function renderCenter() {
     card.className = 'variant-card bg-zinc-950 rounded-lg overflow-hidden border border-zinc-800';
     card.innerHTML = `
       <div class="aspect-[9/16] bg-black overflow-hidden">
-        <img src="/output/${encodeURIComponent(f.frame_id)}/v${idx + 1}.png?v=${cacheKey}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.opacity=0.3">
+        <img src="/projects/${encodeURIComponent(currentSlug)}/output/${encodeURIComponent(f.frame_id)}/v${idx + 1}.png?v=${cacheKey}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.opacity=0.3">
       </div>
       <div class="p-2 flex items-center justify-between">
         <div class="text-xs">
@@ -802,10 +890,10 @@ function renderViewMode(f) {
   let pathBase = '';
   if (viewState.attemptId === 'current' && hasCurrent) {
     meta = data.current;
-    pathBase = `/output/${encodeURIComponent(f.frame_id)}`;
+    pathBase = `/projects/${encodeURIComponent(currentSlug)}/output/${encodeURIComponent(f.frame_id)}`;
   } else {
     meta = attempts.find(a => a.attempt_id === viewState.attemptId);
-    if (meta) pathBase = `/output/${encodeURIComponent(f.frame_id)}/attempts/${encodeURIComponent(meta.attempt_id)}`;
+    if (meta) pathBase = `/projects/${encodeURIComponent(currentSlug)}/output/${encodeURIComponent(f.frame_id)}/attempts/${encodeURIComponent(meta.attempt_id)}`;
   }
 
   if (!meta) {
@@ -990,7 +1078,7 @@ $('nf-files').addEventListener('change', async (e) => {
     try {
       const dataUrl = await fileToBase64(file);
       const base64 = dataUrl.split(',')[1] || '';
-      const r = await fetch('/api/upload-reference', {
+      const r = await fetch(apiUrl('/api/upload-reference'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: file.name, base64 })
@@ -1045,7 +1133,7 @@ $('btn-submit-add').onclick = async () => {
 async function deleteCustomFrame(frameId) {
   if (!confirm(`Xoá custom frame ${frameId}? Hành động này không thể undo.`)) return;
   try {
-    const r = await fetch(`/api/custom-frame/${encodeURIComponent(frameId)}`, { method: 'DELETE' });
+    const r = await fetch(apiUrl(`/api/custom-frame/${encodeURIComponent(frameId)}`), { method: 'DELETE' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       toast(j.error || `HTTP ${r.status}`, 'error');
@@ -1063,9 +1151,18 @@ async function deleteCustomFrame(frameId) {
 }
 
 // ─── Actions ───
+// Multi-project: scope project-routed paths to currentSlug
+let currentSlug = localStorage.getItem('vf:currentSlug') || 'default';
+const GLOBAL_PATHS = ['/api/setup/', '/api/config', '/api/projects', '/api/logs'];
+function apiUrl(path) {
+  if (!path.startsWith('/api/')) return path;
+  if (GLOBAL_PATHS.some(p => path.startsWith(p))) return path;
+  // /api/X → /api/p/<slug>/X
+  return path.replace(/^\/api\//, `/api/p/${currentSlug}/`);
+}
 async function api(path, body) {
   try {
-    const r = await fetch(path, {
+    const r = await fetch(apiUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
@@ -1444,8 +1541,9 @@ $('btn-save-settings').onclick = async () => {
 
 // ─── Init ───
 connectSSE();
-fetchState();
+fetchProjects().then(() => fetchState());
 setInterval(fetchState, 4000);
+setInterval(fetchProjects, 30000); // refresh project list mỗi 30s (catch new project added)
 maybeShowWizard();
 </script>
 </body>
