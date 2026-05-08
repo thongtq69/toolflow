@@ -175,28 +175,34 @@ const pagePool = new Proxy([], {
   },
 });
 // Recover worker page nếu bị user đóng. Handle cả case ctx chết hoàn toàn.
+// Ctx alive check phải attempt newPage thực sự — pages() không throw kể cả khi disconnect.
 const recoverWorkerPage = async (proj, w) => {
   let projCtx = proj.ctx || ctx;
-  let ctxAlive = false;
+  let newPage;
+  // Attempt newPage trên ctx hiện tại — nếu fail vì ctx closed, relaunch.
   try {
-    if (projCtx) { projCtx.pages(); ctxAlive = true; }
-  } catch { ctxAlive = false; }
-
-  if (!ctxAlive) {
-    // Ctx chết hoàn toàn → relaunch
-    const profilePath = proj.profileDir
-      ? path.resolve(proj.profileDir)
-      : path.resolve(USER_DATA_DIR);
-    console.warn(`[recover ${proj.slug}] ctx dead → relaunching profile ${profilePath}`);
-    ctxByProfile.delete(profilePath);
-    try { await projCtx?.close(); } catch {}
-    projCtx = await launchCtx(profilePath);
-    proj.ctx = projCtx;
-    if (!proj.profileDir) ctx = projCtx; // share global ctx
+    if (!projCtx) throw new Error('no ctx');
+    newPage = await projCtx.newPage();
+  } catch (e) {
+    const msg = e.message || '';
+    if (/closed|disconnect/i.test(msg)) {
+      const profilePath = proj.profileDir
+        ? path.resolve(proj.profileDir)
+        : path.resolve(USER_DATA_DIR);
+      console.warn(`[recover ${proj.slug}] ctx dead (${msg.split('\n')[0]}) → relaunch ${profilePath}`);
+      ctxByProfile.delete(profilePath);
+      try { await projCtx?.close(); } catch {}
+      projCtx = await launchCtx(profilePath);
+      proj.ctx = projCtx;
+      if (!proj.profileDir) ctx = projCtx;
+      newPage = await projCtx.newPage();
+    } else {
+      throw e;
+    }
   }
 
   console.warn(`[recover ${proj.slug}] ${w.id} → new page`);
-  w.page = await projCtx.newPage();
+  w.page = newPage;
   await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
   w.settingsVerified = false;
 };
@@ -384,24 +390,25 @@ const initBrowser = async () => {
   const totalWorkers = [...projects.values()].reduce((s, p) => s + (p.workersTarget || 0), 0);
   console.log(`[init] projects=${projects.size}  total_workers=${totalWorkers}`);
 
-  // Global ctx (cho project share account chung — không có profileDir riêng)
+  // Global ctx cho project share account (default). Project khác lazy-launch khi anh
+  // thực sự gen frame (acquireWorker tự gọi launchProjectWorkers nếu pagePool empty).
+  // Trước đây launch 5 tab cùng lúc gây rối mắt — giờ chỉ launch default ở startup.
   const sharedAbsProfile = path.resolve(USER_DATA_DIR);
   const hasSharedProjects = [...projects.values()].some(p => !p.profileDir);
   if (hasSharedProjects) {
     ctx = await launchCtx(sharedAbsProfile);
   }
 
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  let firstPageUsed = false;
-  for (const proj of projects.values()) {
+  const dp = projects.get('default');
+  if (dp) {
     try {
-      await launchProjectWorkers(proj, { reuseFirstPage: !firstPageUsed });
-      if (proj.pagePool.length > 0 && !proj.profileDir) firstPageUsed = true;
+      await launchProjectWorkers(dp, { reuseFirstPage: true });
     } catch (e) {
-      console.error(`[init ${proj.slug}] launch fail: ${e.message} — skip, project sẽ tự launch khi acquireWorker`);
+      console.error(`[init default] launch fail: ${e.message} — sẽ tự launch khi acquireWorker`);
     }
   }
-  console.log(`[init] ✓ ${allWorkers().length} worker(s) ready across ${projects.size} project(s) trong ${ctxByProfile.size} browser ctx`);
+  const skipped = [...projects.values()].filter(p => p.slug !== 'default').map(p => p.slug);
+  console.log(`[init] ✓ ${allWorkers().length} worker(s) ready cho default; ${skipped.length ? `lazy-launch khi gen: ${skipped.join(',')}` : 'không có project khác'}`);
 };
 
 // Launch workers cho 1 project: tạo ctx (nếu profile riêng) + N pages.
