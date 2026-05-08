@@ -264,6 +264,67 @@
   </div>
 </div>
 
+<!-- Login modal: cho user login Google account khác cho 1 project -->
+<div id="login-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-semibold">🔑 Đổi Google account — <span id="login-modal-slug" class="text-emerald-400 mono"></span></h3>
+      <button id="login-modal-close" class="text-zinc-500 hover:text-zinc-200 text-xl">×</button>
+    </div>
+    <div id="login-modal-body">
+      <div id="login-step-1" class="space-y-3">
+        <div class="bg-zinc-950 border border-zinc-800 rounded p-3 text-sm">
+          <p class="font-semibold text-amber-400 mb-2">⚠️ Lưu ý</p>
+          <p class="text-zinc-400">
+            Sẽ <b>xoá toàn bộ cookies</b> của project này → bot mở trang login Google trên tab Chromium.
+            Account hiện tại bị logout. Login account mới rồi bot tự detect.
+          </p>
+        </div>
+        <div class="bg-blue-950/30 border border-blue-800 rounded p-3 text-sm">
+          <p class="text-zinc-400">
+            <b class="text-blue-400">💡 Tip</b>: Project này dùng
+            <span id="login-modal-profile" class="mono text-amber-400">profile shared</span>.
+            Nếu share account, đổi sẽ ảnh hưởng <b>tất cả project share</b>.
+            Muốn account riêng → tạo project mới với "Tài khoản riêng".
+          </p>
+        </div>
+        <div class="flex gap-2 mt-3 justify-end">
+          <button id="login-cancel-1" class="btn btn-zinc text-xs">Cancel</button>
+          <button id="login-start" class="btn btn-amber text-xs">🔑 Mở trang login → tiếp tục</button>
+        </div>
+      </div>
+      <div id="login-step-2" style="display:none;" class="space-y-3">
+        <div class="bg-zinc-950 border border-zinc-800 rounded p-4 text-center">
+          <div class="text-3xl mb-2 animate-pulse">⏳</div>
+          <p class="font-semibold mb-1">Đang đợi login...</p>
+          <p class="text-xs text-zinc-500" id="login-status-text">Mở Chromium tab → login Google account mới</p>
+        </div>
+        <div class="bg-emerald-950/30 border border-emerald-800 rounded p-3 text-sm">
+          <ol class="list-decimal pl-5 space-y-1 text-zinc-400">
+            <li>Tab Chromium đã mở trang login Google</li>
+            <li>Login account mới (email + password)</li>
+            <li>Bot tự detect cookies → tiếp tục automatic</li>
+          </ol>
+        </div>
+        <div class="flex gap-2 mt-3 justify-between">
+          <button id="login-cancel-2" class="btn btn-zinc text-xs">Cancel (huỷ)</button>
+          <button id="login-skip-poll" class="btn btn-emerald text-xs">✓ Đã login xong</button>
+        </div>
+      </div>
+      <div id="login-step-3" style="display:none;" class="space-y-3">
+        <div class="bg-emerald-950 border border-emerald-700 rounded p-4 text-center">
+          <div class="text-3xl mb-2">✅</div>
+          <p class="font-semibold mb-1">Login thành công!</p>
+          <p class="text-xs text-zinc-400" id="login-success-text">Bot đã nav workers về project URL</p>
+        </div>
+        <div class="flex justify-end">
+          <button id="login-done" class="btn btn-emerald text-xs">Đóng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Setup Wizard Modal (first-run, blocks UI, no dismiss) -->
 <div id="wizard-modal" class="modal-wizard-backdrop" style="display:none;">
   <div class="modal-wizard-card p-6">
@@ -589,15 +650,88 @@ async function openNewProjectPrompt() {
   }
 }
 
-async function resetProjectLogin(slug, name) {
-  if (!confirm(`Đổi account Google cho project "${name || slug}"?\n\nSẽ xoá cookies + đưa ${slug}'s tabs về trang login Flow. Anh login account mới rồi tab tự refresh.\n\nDùng để:\n- Bypass rate-limit (login account khác)\n- Đổi sang account khác mà không restart server`)) return;
+// Login modal state — poll interval ID + current slug
+let loginPollId = null;
+let loginCurSlug = null;
+
+function openLoginModal(slug, name) {
+  loginCurSlug = slug;
+  $('login-modal-slug').textContent = slug;
+  // Show profile info
+  const proj = projectsList.find(p => p.slug === slug);
+  $('login-modal-profile').textContent = proj?.hasOwnProfile ? `account RIÊNG (${proj.profileDir})` : 'profile SHARED (chung với các project khác)';
+  // Reset to step 1
+  $('login-step-1').style.display = '';
+  $('login-step-2').style.display = 'none';
+  $('login-step-3').style.display = 'none';
+  $('login-modal').style.display = 'flex';
+}
+
+function closeLoginModal() {
+  if (loginPollId) { clearInterval(loginPollId); loginPollId = null; }
+  $('login-modal').style.display = 'none';
+  loginCurSlug = null;
+}
+
+async function startLoginFlow() {
+  const slug = loginCurSlug;
+  if (!slug) return;
+  $('login-step-1').style.display = 'none';
+  $('login-step-2').style.display = '';
   try {
     const r = await fetch(`/api/projects/${encodeURIComponent(slug)}/reset-login`, { method: 'POST' }).then(r => r.json());
+    if (r.error) {
+      toast(r.error, 'error');
+      $('login-step-1').style.display = '';
+      $('login-step-2').style.display = 'none';
+      return;
+    }
+    // Bắt đầu poll login-status mỗi 2s
+    let pollCount = 0;
+    loginPollId = setInterval(async () => {
+      pollCount++;
+      $('login-status-text').textContent = `Đang đợi login... (${pollCount * 2}s)`;
+      try {
+        const st = await fetch(`/api/projects/${encodeURIComponent(slug)}/login-status`).then(r => r.json());
+        if (st.loggedIn) {
+          clearInterval(loginPollId); loginPollId = null;
+          await onLoginDetected(slug);
+        }
+      } catch {}
+    }, 2000);
+  } catch (e) {
+    toast('Lỗi: ' + e.message, 'error');
+    closeLoginModal();
+  }
+}
+
+async function onLoginDetected(slug) {
+  $('login-status-text').textContent = '✓ Detect cookies — đang nav workers về project...';
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(slug)}/login-complete`, { method: 'POST' }).then(r => r.json());
     if (r.error) { toast(r.error, 'error'); return; }
-    toast(r.message || 'Đã reset login', 'success');
+    $('login-step-2').style.display = 'none';
+    $('login-step-3').style.display = '';
+    $('login-success-text').textContent = r.message || 'Done';
+    toast(`Đã login account mới cho ${slug}`, 'success');
+    fetchState();
   } catch (e) {
     toast('Lỗi: ' + e.message, 'error');
   }
+}
+
+// Wire buttons (sau khi DOM ready)
+$('login-modal-close').onclick = closeLoginModal;
+$('login-cancel-1').onclick = closeLoginModal;
+$('login-cancel-2').onclick = closeLoginModal;
+$('login-done').onclick = closeLoginModal;
+$('login-start').onclick = startLoginFlow;
+$('login-skip-poll').onclick = async () => {
+  if (loginCurSlug) await onLoginDetected(loginCurSlug);
+};
+
+async function resetProjectLogin(slug, name) {
+  openLoginModal(slug, name);
 }
 
 function appendLog(entry) {

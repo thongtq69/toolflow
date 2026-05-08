@@ -1146,8 +1146,8 @@ app.delete('/api/projects/:slug', async (req, res) => {
   }
 });
 
-// Reset login cho project — xoá cookies, lần sau gen sẽ redirect login
-// Body: { logout: true } → close ctx + clear cookies + restart hint
+// Reset login cho project — xoá cookies, mở trang accounts.google.com để user login
+// Worker đầu tiên brought to front để dễ thấy.
 app.post('/api/projects/:slug/reset-login', async (req, res) => {
   try {
     const slug = req.params.slug;
@@ -1157,21 +1157,79 @@ app.post('/api/projects/:slug/reset-login', async (req, res) => {
       return res.status(409).json({ error: `Project "${slug}" đang có job, stop trước rồi reset` });
     }
     if (!proj.ctx) return res.status(400).json({ error: 'Project chưa launch browser ctx' });
-    // Clear cookies trên ctx
     try {
       await proj.ctx.clearCookies();
       console.log(`[reset-login ${slug}] ✓ cleared cookies`);
     } catch (e) {
       return res.status(500).json({ error: `clearCookies fail: ${e.message}` });
     }
-    // Navigate workers về Flow root → user login lại
-    for (const w of proj.pagePool) {
+    // Worker 1: mở trang login Google + bring to front
+    const w0 = proj.pagePool[0];
+    if (w0) {
+      try {
+        await w0.page.bringToFront();
+        await w0.page.goto('https://accounts.google.com/signin?continue=https://labs.google/fx/tools/flow', {
+          waitUntil: 'domcontentloaded', timeout: 30000
+        });
+        w0.settingsVerified = false;
+      } catch (e) { console.warn(`[reset-login ${slug}] open login ${w0.id} failed: ${e.message}`); }
+    }
+    // Workers còn lại nav background về Flow root (sẽ tự redirect login khi cookie missing)
+    for (const w of proj.pagePool.slice(1)) {
       try {
         await w.page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded', timeout: 30000 });
         w.settingsVerified = false;
       } catch (e) { console.warn(`[reset-login ${slug}] re-nav ${w.id} failed: ${e.message}`); }
     }
-    res.json({ ok: true, slug, message: `Đã clear cookies. ${proj.pagePool.length} tab(s) navigated to Flow login. Login account mới rồi reload UI.` });
+    res.json({ ok: true, slug, message: `Đã mở trang login Google trên tab Chromium. Login account mới — bot tự detect.` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Check login status: poll endpoint cho UI biết khi nào user login xong
+app.get('/api/projects/:slug/login-status', async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    const proj = projects.get(slug);
+    if (!proj) return res.status(404).json({ error: `Project "${slug}" không tồn tại` });
+    if (!proj.ctx) return res.json({ loggedIn: false, reason: 'no ctx' });
+    try {
+      const cookies = await proj.ctx.cookies(['https://accounts.google.com', 'https://labs.google']);
+      const loggedIn = cookies.some(c =>
+        /\.?google\.com$/.test(c.domain) &&
+        /^(SID|SAPISID|SSID|HSID|APISID|__Secure-)/i.test(c.name)
+      );
+      const w0 = proj.pagePool[0];
+      const currentUrl = w0?.page?.url() || '';
+      res.json({ loggedIn, currentUrl, slug });
+    } catch (e) {
+      res.json({ loggedIn: false, reason: e.message });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Sau khi user login xong → nav workers về project URL + verify settings
+app.post('/api/projects/:slug/login-complete', async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    const proj = projects.get(slug);
+    if (!proj) return res.status(404).json({ error: `Project "${slug}" không tồn tại` });
+    if (!proj.ctx || !proj.projectUrl) return res.status(400).json({ error: 'Project chưa setup' });
+    const cookies = await proj.ctx.cookies(['https://accounts.google.com', 'https://labs.google']);
+    const loggedIn = cookies.some(c => /\.?google\.com$/.test(c.domain) && /^(SID|SAPISID|SSID|HSID|APISID|__Secure-)/i.test(c.name));
+    if (!loggedIn) return res.status(400).json({ error: 'Chưa detect login — kiểm tra lại' });
+    // Nav tất cả workers về project URL
+    for (const w of proj.pagePool) {
+      try {
+        await w.page.goto(proj.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        w.settingsVerified = false;
+      } catch (e) { console.warn(`[login-complete ${slug}] nav ${w.id} fail: ${e.message}`); }
+    }
+    console.log(`[login-complete ${slug}] ✓ ${proj.pagePool.length} worker(s) ready với account mới`);
+    res.json({ ok: true, slug, message: `${proj.pagePool.length} worker(s) đã sẵn sàng với account mới` });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
